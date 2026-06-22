@@ -1,0 +1,5 @@
+pillow>=10.0.0
+numpy>=1.24,<2
+tqdm>=4.65.0
+# used only by src/process_scans.py (scan alignment + cropping)
+opencv-python>=4.8.0

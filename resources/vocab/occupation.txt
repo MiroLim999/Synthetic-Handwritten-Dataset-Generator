@@ -1,0 +1,50 @@
+Farmer
+Teacher
+Housekeeper
+Housewife
+Driver
+Merchant
+Laborer
+Fisherman
+Carpenter
+Nurse
+Clerk
+Engineer
+Vendor
+Seamstress
+Government Employee
+Student
+Tailor
+Dressmaker
+Blacksmith
+Barber
+Shoemaker
+Baker
+Butcher
+Storekeeper
+Sari-sari Store Owner
+Midwife
+Physician
+Lawyer
+Priest
+Soldier
+Policeman
+Mechanic
+Mason
+Plumber
+Electrician
+Cook
+Maid
+Laundress
+Weaver
+Potter
+Tuba Gatherer
+Copra Maker
+Sugar Planter
+Rice Farmer
+Coconut Farmer
+Cattle Raiser
+Hunter
+None
+Retired
+Pensioner

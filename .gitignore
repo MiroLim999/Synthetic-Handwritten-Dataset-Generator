@@ -1,0 +1,10 @@
+# generated dataset (large, regenerable)
+dataset/
+
+# downloaded font files (license-dependent, user-provided)
+resources/fonts/*
+!resources/fonts/.gitkeep
+
+__pycache__/
+*.pyc
+.DS_Store

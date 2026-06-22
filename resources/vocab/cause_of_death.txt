@@ -1,0 +1,57 @@
+Pneumonia
+Pulmonary Tuberculosis
+Tuberculosis
+Fever
+Malaria
+Dysentery
+Beri-beri
+Heart Failure
+Cardiac Arrest
+Cerebral Hemorrhage
+Cancer
+Old Age
+Senility
+Drowning
+Convulsion
+Diarrhea
+Influenza
+Bronchitis
+Nephritis
+Tetanus
+Anemia
+Stroke
+Childbirth
+Complications of Childbirth
+Whooping Cough
+Measles
+Smallpox
+Typhoid Fever
+Gastroenteritis
+Asthma
+Cholera
+Dengue Fever
+Heart Disease
+Hypertension
+Liver Disease
+Kidney Failure
+Pulmonary Edema
+Cerebrovascular Accident
+Cardiac Arrest
+Respiratory Failure
+Acute Bronchitis
+Intestinal Obstruction
+Snake Bite
+Accident
+Vehicular Accident
+Gunshot Wound
+Hemorrhage
+Septicemia
+Meningitis
+Diphtheria
+Leprosy
+Malnutrition
+Premature Birth
+Stillbirth
+Unknown
+Natural Causes
+Undetermined
