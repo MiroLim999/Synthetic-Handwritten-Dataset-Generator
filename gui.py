@@ -36,7 +36,7 @@ class App(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("Civil Registry Dataset Generator")
-        self.geometry("460x330")
+        self.geometry("460x380")
         self.resizable(False, False)
 
         self.q = queue.Queue()
@@ -59,10 +59,19 @@ class App(tk.Tk):
             ttk.Button(qp, text=f"{n:,}", width=8,
                        command=lambda v=n: self.count_var.set(str(v))).pack(side="left", padx=3)
 
+        # --- dataset target ---------------------------------------------
+        drow = ttk.Frame(self)
+        drow.pack(fill="x", padx=12, pady=(10, 0))
+        ttk.Label(drow, text="Dataset folder:").pack(side="left")
+        self.dataset_var = tk.StringVar(value="(next)")
+        ttk.Entry(drow, textvariable=self.dataset_var, width=14).pack(side="left", padx=8)
+        ttk.Label(drow, text="name or number, blank = next",
+                  foreground="#555").pack(side="left")
+
         # --- options -----------------------------------------------------
-        self.splits_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(self, text="Build train/val/test splits afterwards",
-                        variable=self.splits_var).pack(anchor="w", padx=12, pady=(10, 0))
+        self.real_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(self, text="Merge real (mock) data afterwards",
+                        variable=self.real_var).pack(anchor="w", padx=12, pady=(10, 0))
 
         # --- progress ----------------------------------------------------
         self.progress = ttk.Progressbar(self, length=420, mode="determinate")
@@ -104,20 +113,24 @@ class App(tk.Tk):
         self.timer.config(text="")
         self.start_time = time.time()
 
-        self.worker = threading.Thread(target=self._run, args=(count,), daemon=True)
+        dataset = self.dataset_var.get().strip()
+        if dataset in ("", "(next)"):
+            dataset = None
+
+        self.worker = threading.Thread(target=self._run, args=(count, dataset), daemon=True)
         self.worker.start()
         self.after(100, self._poll)
 
-    def _run(self, count):
+    def _run(self, count, dataset):
         """Runs in a background thread."""
         try:
             def cb(done, total, field_type):
                 self.q.put(("progress", done, total, field_type))
-            generate(count, progress_callback=cb, show_bar=False)
-            if self.splits_var.get():
-                self.q.put(("status", "Building splits..."))
-                build()
-            self.q.put(("done", count))
+            out_dir = generate(count, dataset=dataset, progress_callback=cb, show_bar=False)
+            if self.real_var.get():
+                self.q.put(("status", "Merging real data..."))
+                build(out_dir.name)
+            self.q.put(("done", count, str(out_dir)))
         except Exception as e:  # surface any error to the UI
             self.q.put(("error", str(e)))
 
@@ -149,7 +162,7 @@ class App(tk.Tk):
                     self.status.config(text=f"Done. Generated {msg[1]:,} samples.")
                     self.timer.config(text=f"Total time: {self._fmt(total_time)}")
                     self.btn.config(state="normal")
-                    out = config.SPLITS_DIR if self.splits_var.get() else config.SYNTHETIC_DIR
+                    out = msg[2]
                     messagebox.showinfo(
                         "Finished",
                         f"Generated {msg[1]:,} samples in {self._fmt(total_time)}.\n\nOutput:\n{out}"

@@ -1,21 +1,27 @@
 """
 Synthetic data generator.
 
-Generates fake handwriting field images + labels:
+Generates fake handwriting field images + labels and writes them STRAIGHT
+into a numbered dataset folder, already divided into train / val / test:
+
   1. choose a field type (weighted by config.FIELD_WEIGHTS)
   2. generate a realistic value for it
   3. render it in a random handwriting font
   4. degrade it to look like an old scan
-  5. save the image and record (filename, label, field_type, font)
+  5. assign it to train / val / test and save it there
 
-Output:
-  dataset/synthetic/images/syn_000001.png ...
-  dataset/synthetic/manifest.csv   (filename, label, field_type, font)
-  dataset/synthetic/labels.csv     (filename, label)   <- simple format
+Each run gets its own folder so nothing is ever overwritten:
+
+  dataset/datasets/dataset_001/train/syn_000001.png ...
+  dataset/datasets/dataset_001/val/...
+  dataset/datasets/dataset_001/test/...
+  dataset/datasets/dataset_001/labels.csv          (filename, label, split)
+  dataset/datasets/dataset_001/manifest.csv        (filename, label, split, field_type, font)
 
 Usage:
   python -m src.generate_synthetic --count 20000
-  python -m src.generate_synthetic --count 200 --out dataset/synthetic
+  python -m src.generate_synthetic --count 5000 --dataset 2
+  python -m src.generate_synthetic --count 200 --dataset my_test_run
 """
 
 import argparse
@@ -37,18 +43,46 @@ def _weighted_field_types(n: int) -> list[str]:
     return random.choices(types, weights=weights, k=n)
 
 
-def generate(count: int, out_dir=None, seed: int = config.RANDOM_SEED,
-             progress_callback=None, show_bar: bool = True) -> None:
+def _split_assignments(count: int) -> list[str]:
+    """
+    Return a shuffled list of length `count` where each entry is
+    'train', 'val' or 'test' following the configured fractions.
+    """
+    n_train = int(count * config.SYNTH_TRAIN_FRAC)
+    n_val = int(count * config.SYNTH_VAL_FRAC)
+    # test gets the remainder so the counts always add up to `count`
+    n_test = count - n_train - n_val
+
+    assignments = (["train"] * n_train) + (["val"] * n_val) + (["test"] * n_test)
+    random.shuffle(assignments)
+    return assignments
+
+
+def generate(count: int, dataset=None, seed: int = config.RANDOM_SEED,
+             progress_callback=None, show_bar: bool = True):
+    """
+    Generate `count` synthetic samples into a numbered dataset folder.
+
+    dataset:
+        None        -> auto-pick the next free folder (dataset_001, _002, ...)
+        int/str     -> dataset/datasets/dataset_<n> or dataset/datasets/<name>
+
+    Returns the output Path of the dataset folder that was created.
+    """
     random.seed(seed)
 
-    out_dir = out_dir or config.SYNTHETIC_DIR
-    img_dir = out_dir / "images"
-    img_dir.mkdir(parents=True, exist_ok=True)
+    out_dir = config.resolve_dataset_dir(dataset)
+    split_dirs = {}
+    for split in config.SPLIT_NAMES:
+        d = out_dir / split
+        d.mkdir(parents=True, exist_ok=True)
+        split_dirs[split] = d
 
     # Intro info BEFORE the bar starts, so the user immediately sees what's running.
     n_fonts = len(available_fonts())
     print(f"Generating {count:,} synthetic samples")
-    print(f"  output : {img_dir}")
+    print(f"  output : {out_dir}")
+    print(f"  splits : {', '.join(config.SPLIT_NAMES)}")
     print(f"  fonts  : {n_fonts} handwriting fonts")
     print()
 
@@ -56,12 +90,13 @@ def generate(count: int, out_dir=None, seed: int = config.RANDOM_SEED,
     labels_rows = []
 
     field_types = _weighted_field_types(count)
+    split_for = _split_assignments(count)
 
-    iterator = field_types
+    iterator = list(enumerate(zip(field_types, split_for), start=1))
     progress = None
     if show_bar:
         progress = tqdm(
-            field_types,
+            iterator,
             desc="Generating",
             unit="img",
             ncols=80,
@@ -70,19 +105,19 @@ def generate(count: int, out_dir=None, seed: int = config.RANDOM_SEED,
         )
         iterator = progress
 
-    for i, field_type in enumerate(iterator, start=1):
+    for i, (field_type, split) in iterator:
         label = fields.make_value(field_type)
         img, font_used = render_text(label)
         img = degrade(img)
 
         file_name = f"syn_{i:06d}.png"
-        img.save(img_dir / file_name)
+        img.save(split_dirs[split] / file_name)
 
-        manifest_rows.append([file_name, label, field_type, font_used])
-        labels_rows.append([file_name, label])
+        manifest_rows.append([file_name, label, split, field_type, font_used])
+        labels_rows.append([file_name, label, split])
 
         if progress is not None and i % 50 == 0:
-            progress.set_postfix_str(field_type)
+            progress.set_postfix_str(f"{split}/{field_type}")
         # let an external UI (e.g. the GUI) track progress
         if progress_callback is not None:
             progress_callback(i, count, field_type)
@@ -91,13 +126,15 @@ def generate(count: int, out_dir=None, seed: int = config.RANDOM_SEED,
         progress.close()
 
     _write_csv(out_dir / "manifest.csv",
-               ["filename", "label", "field_type", "font"], manifest_rows)
+               ["filename", "label", "split", "field_type", "font"], manifest_rows)
     _write_csv(out_dir / "labels.csv",
-               None, labels_rows)
+               ["filename", "label", "split"], labels_rows)
 
-    print(f"\nGenerated {count:,} samples -> {img_dir}")
+    print(f"\nGenerated {count:,} samples -> {out_dir}")
     print(f"Manifest: {out_dir / 'manifest.csv'}")
+    _print_split_distribution(split_for)
     _print_distribution(manifest_rows)
+    return out_dir
 
 
 def _write_csv(path, header, rows):
@@ -108,9 +145,18 @@ def _write_csv(path, header, rows):
         writer.writerows(rows)
 
 
+def _print_split_distribution(split_for):
+    counts = {}
+    for split in split_for:
+        counts[split] = counts.get(split, 0) + 1
+    print("\nSplit distribution:")
+    for split in config.SPLIT_NAMES:
+        print(f"  {split:<6} {counts.get(split, 0)}")
+
+
 def _print_distribution(rows):
     counts = {}
-    for _, _, field_type, _ in rows:
+    for _, _, _, field_type, _ in rows:
         counts[field_type] = counts.get(field_type, 0) + 1
     print("\nField distribution:")
     for field_type, n in sorted(counts.items(), key=lambda x: -x[1]):
@@ -121,14 +167,12 @@ def main():
     parser = argparse.ArgumentParser(description="Generate synthetic handwriting data.")
     parser.add_argument("--count", type=int, default=config.DEFAULT_COUNT,
                         help=f"number of samples (default {config.DEFAULT_COUNT})")
-    parser.add_argument("--out", type=str, default=None,
-                        help="output directory (default dataset/synthetic)")
+    parser.add_argument("--dataset", type=str, default=None,
+                        help="dataset name or number (default: next free dataset_NNN)")
     parser.add_argument("--seed", type=int, default=config.RANDOM_SEED)
     args = parser.parse_args()
 
-    from pathlib import Path
-    out_dir = Path(args.out) if args.out else None
-    generate(args.count, out_dir, args.seed)
+    generate(args.count, args.dataset, args.seed)
 
 
 if __name__ == "__main__":
