@@ -36,7 +36,7 @@ class App(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("Civil Registry Dataset Generator")
-        self.geometry("460x380")
+        self.geometry("460x420")
         self.resizable(False, False)
 
         self.q = queue.Queue()
@@ -67,6 +67,16 @@ class App(tk.Tk):
         ttk.Entry(drow, textvariable=self.dataset_var, width=14).pack(side="left", padx=8)
         ttk.Label(drow, text="name or number, blank = next",
                   foreground="#555").pack(side="left")
+
+        # --- names version ----------------------------------------------
+        nrow = ttk.Frame(self)
+        nrow.pack(fill="x", padx=12, pady=(8, 0))
+        ttk.Label(nrow, text="Names version:").pack(side="left")
+        versions = config.name_versions() or [config.NAMES_VERSION]
+        default_version = config.NAMES_VERSION if config.NAMES_VERSION in versions else versions[0]
+        self.names_var = tk.StringVar(value=default_version)
+        ttk.Combobox(nrow, textvariable=self.names_var, values=versions,
+                     state="readonly", width=12).pack(side="left", padx=8)
 
         # --- options -----------------------------------------------------
         self.real_var = tk.BooleanVar(value=False)
@@ -116,17 +126,20 @@ class App(tk.Tk):
         dataset = self.dataset_var.get().strip()
         if dataset in ("", "(next)"):
             dataset = None
+        names_version = self.names_var.get().strip() or None
 
-        self.worker = threading.Thread(target=self._run, args=(count, dataset), daemon=True)
+        self.worker = threading.Thread(target=self._run,
+                                       args=(count, dataset, names_version), daemon=True)
         self.worker.start()
         self.after(100, self._poll)
 
-    def _run(self, count, dataset):
+    def _run(self, count, dataset, names_version):
         """Runs in a background thread."""
         try:
             def cb(done, total, field_type):
                 self.q.put(("progress", done, total, field_type))
-            out_dir = generate(count, dataset=dataset, progress_callback=cb, show_bar=False)
+            out_dir = generate(count, dataset=dataset, names_version=names_version,
+                               progress_callback=cb, show_bar=False)
             if self.real_var.get():
                 self.q.put(("status", "Merging real data..."))
                 build(out_dir.name)

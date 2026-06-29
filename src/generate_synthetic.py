@@ -59,6 +59,7 @@ def _split_assignments(count: int) -> list[str]:
 
 
 def generate(count: int, dataset=None, seed: int = config.RANDOM_SEED,
+             names_version: str = None,
              progress_callback=None, show_bar: bool = True):
     """
     Generate `count` synthetic samples into a numbered dataset folder.
@@ -66,10 +67,18 @@ def generate(count: int, dataset=None, seed: int = config.RANDOM_SEED,
     dataset:
         None        -> auto-pick the next free folder (dataset_001, _002, ...)
         int/str     -> dataset/datasets/dataset_<n> or dataset/datasets/<name>
+    names_version:
+        None        -> use config.NAMES_VERSION (default name pool)
+        'name1'/'name2'/... -> draw names from resources/<names_version>
 
     Returns the output Path of the dataset folder that was created.
     """
     random.seed(seed)
+
+    # Select which name pool to draw from for this run.
+    if names_version:
+        config.NAMES_VERSION = names_version
+        config.NAMES_DIR = config.RESOURCES_DIR / names_version
 
     out_dir = config.resolve_dataset_dir(dataset)
     split_dirs = {}
@@ -83,6 +92,7 @@ def generate(count: int, dataset=None, seed: int = config.RANDOM_SEED,
     print(f"Generating {count:,} synthetic samples")
     print(f"  output : {out_dir}")
     print(f"  splits : {', '.join(config.SPLIT_NAMES)}")
+    print(f"  names  : {config.NAMES_VERSION}")
     print(f"  fonts  : {n_fonts} handwriting fonts")
     print()
 
@@ -169,10 +179,12 @@ def main():
                         help=f"number of samples (default {config.DEFAULT_COUNT})")
     parser.add_argument("--dataset", type=str, default=None,
                         help="dataset name or number (default: next free dataset_NNN)")
+    parser.add_argument("--names", type=str, default=None,
+                        help="names version folder under resources/ (e.g. name1, name2)")
     parser.add_argument("--seed", type=int, default=config.RANDOM_SEED)
     args = parser.parse_args()
 
-    generate(args.count, args.dataset, args.seed)
+    generate(args.count, args.dataset, args.seed, names_version=args.names)
 
 
 if __name__ == "__main__":

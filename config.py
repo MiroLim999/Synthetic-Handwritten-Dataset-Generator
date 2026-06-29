@@ -16,7 +16,12 @@ from pathlib import Path
 ROOT = Path(__file__).parent
 RESOURCES_DIR = ROOT / "resources"
 FONTS_DIR = RESOURCES_DIR / "fonts"
-NAMES_DIR = RESOURCES_DIR / "names"
+# Which name pool to draw from. Each version is its own folder under
+# resources/ holding first_names.txt, middle_names.txt, last_names.txt:
+#   resources/name1/...   resources/name2/...
+# Switch versions by changing this, or pass --names name2 on the CLI.
+NAMES_VERSION = "name1"
+NAMES_DIR = RESOURCES_DIR / NAMES_VERSION
 VOCAB_DIR = RESOURCES_DIR / "vocab"
 PLACES_FILE = RESOURCES_DIR / "places.txt"
 
@@ -155,3 +160,15 @@ def resolve_dataset_dir(name=None) -> "Path":
     if name.isdigit():
         return DATASETS_DIR / f"{DATASET_PREFIX}{int(name):03d}"
     return DATASETS_DIR / name
+
+
+def name_versions() -> list:
+    """Return available name-pool folder names (e.g. ['name1', 'name2'])."""
+    if not RESOURCES_DIR.exists():
+        return []
+    required = ("first_names.txt", "middle_names.txt", "last_names.txt")
+    versions = []
+    for p in sorted(RESOURCES_DIR.iterdir()):
+        if p.is_dir() and all((p / f).exists() for f in required):
+            versions.append(p.name)
+    return versions
