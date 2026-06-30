@@ -27,6 +27,8 @@ Usage:
 import argparse
 import csv
 import random
+import shutil
+from pathlib import Path
 
 from tqdm import tqdm
 
@@ -147,6 +149,32 @@ def generate(count: int, dataset=None, seed: int = config.RANDOM_SEED,
     return out_dir
 
 
+def zip_dataset(out_dir, remove_dir: bool = False) -> "Path":
+    """
+    Compress a dataset folder into a sibling .zip archive.
+
+    dataset/datasets/dataset_001/  ->  dataset/datasets/dataset_001.zip
+
+    remove_dir:
+        True  -> delete the original folder after zipping (keep only the .zip)
+        False -> leave the folder in place alongside the .zip
+    Returns the path of the created .zip file.
+    """
+    out_dir = Path(out_dir)
+    # make_archive adds the .zip extension itself, so base_name has none.
+    zip_path = shutil.make_archive(
+        base_name=str(out_dir),
+        format="zip",
+        root_dir=out_dir.parent,
+        base_dir=out_dir.name,
+    )
+    print(f"Zipped dataset -> {zip_path}")
+    if remove_dir:
+        shutil.rmtree(out_dir)
+        print(f"Removed folder -> {out_dir}")
+    return Path(zip_path)
+
+
 def _write_csv(path, header, rows):
     with open(path, "w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
@@ -182,9 +210,15 @@ def main():
     parser.add_argument("--names", type=str, default=None,
                         help="names version folder under resources/ (e.g. name1, name2)")
     parser.add_argument("--seed", type=int, default=config.RANDOM_SEED)
+    parser.add_argument("--zip", action="store_true",
+                        help="also package the finished dataset as a .zip archive")
+    parser.add_argument("--zip-only", action="store_true",
+                        help="with --zip, delete the folder and keep only the .zip")
     args = parser.parse_args()
 
-    generate(args.count, args.dataset, args.seed, names_version=args.names)
+    out_dir = generate(args.count, args.dataset, args.seed, names_version=args.names)
+    if args.zip or args.zip_only:
+        zip_dataset(out_dir, remove_dir=args.zip_only)
 
 
 if __name__ == "__main__":

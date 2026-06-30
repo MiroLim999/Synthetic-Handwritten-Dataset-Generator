@@ -28,7 +28,7 @@ if sys.stderr is None:
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import config
-from src.generate_synthetic import generate
+from src.generate_synthetic import generate, zip_dataset
 from src.build_splits import build
 
 
@@ -36,7 +36,7 @@ class App(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("Civil Registry Dataset Generator")
-        self.geometry("460x420")
+        self.geometry("460x450")
         self.resizable(False, False)
 
         self.q = queue.Queue()
@@ -82,6 +82,10 @@ class App(tk.Tk):
         self.real_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(self, text="Merge real (mock) data afterwards",
                         variable=self.real_var).pack(anchor="w", padx=12, pady=(10, 0))
+
+        self.zip_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(self, text="Package dataset as .zip when done",
+                        variable=self.zip_var).pack(anchor="w", padx=12, pady=(2, 0))
 
         # --- progress ----------------------------------------------------
         self.progress = ttk.Progressbar(self, length=420, mode="determinate")
@@ -143,7 +147,11 @@ class App(tk.Tk):
             if self.real_var.get():
                 self.q.put(("status", "Merging real data..."))
                 build(out_dir.name)
-            self.q.put(("done", count, str(out_dir)))
+            out = str(out_dir)
+            if self.zip_var.get():
+                self.q.put(("status", "Packaging .zip..."))
+                out = str(zip_dataset(out_dir))
+            self.q.put(("done", count, out))
         except Exception as e:  # surface any error to the UI
             self.q.put(("error", str(e)))
 
