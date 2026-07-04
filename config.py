@@ -39,6 +39,18 @@ DATASET_PREFIX = "dataset_"     # folder name prefix for each run
 # Default number of samples when --count is not passed.
 DEFAULT_COUNT = 20_000
 
+# What kind of samples to generate. "regular" keeps the existing field mix.
+# The semi_broken modes keep clean labels but render images with extra missing
+# strokes, scratches, and character gaps so TrOCR learns damaged text.
+SAMPLE_MODES = {
+    "regular": "Regular mixed fields",
+    "semi_broken_mixed": "Semi-broken: mixed",
+    "semi_broken_words": "Semi-broken: words",
+    "semi_broken_characters": "Semi-broken: characters",
+    "semi_broken_numerics": "Semi-broken: numerics",
+}
+DEFAULT_SAMPLE_MODE = "regular"
+
 # Image rendering
 FONT_SIZE_RANGE = (38, 58)        # random font size per sample (px)
 IMAGE_PADDING = 22                # white padding around the text (px)
@@ -77,6 +89,18 @@ AUG_BRIGHTNESS_RANGE = (0.65, 1.15)
 AUG_PAPER_TINT_PROB = 0.75        # aged paper tint
 AUG_FADE_PROB = 0.6               # faded ink (reduce contrast)
 AUG_STAIN_PROB = 0.35             # blotches / foxing spots
+
+# Extra damage for SAMPLE_MODES starting with "semi_broken". These effects are
+# intentionally local: they remove pieces of strokes without changing labels.
+BROKEN_INK_GAP_PROB = 0.90
+BROKEN_INK_GAP_COUNT = (8, 24)
+BROKEN_INK_GAP_SIZE = (3, 16)     # px, used for small white/tinted gaps
+BROKEN_SCRATCH_PROB = 0.70
+BROKEN_SCRATCH_COUNT = (1, 5)
+BROKEN_ERODE_PROB = 0.55
+BROKEN_ERODE_BLEND = (0.15, 0.45)
+BROKEN_CONTRAST_PROB = 0.70
+BROKEN_CONTRAST_RANGE = (0.35, 0.75)
 
 # ---------------------------------------------------------------------------
 # Field mix — relative weights of each field type in synthetic data.

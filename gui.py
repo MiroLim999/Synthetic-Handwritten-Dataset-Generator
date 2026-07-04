@@ -36,7 +36,7 @@ class App(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("Civil Registry Dataset Generator")
-        self.geometry("460x450")
+        self.geometry("460x490")
         self.resizable(False, False)
 
         self.q = queue.Queue()
@@ -77,6 +77,17 @@ class App(tk.Tk):
         self.names_var = tk.StringVar(value=default_version)
         ttk.Combobox(nrow, textvariable=self.names_var, values=versions,
                      state="readonly", width=12).pack(side="left", padx=8)
+
+        # --- sample style -----------------------------------------------
+        mrow = ttk.Frame(self)
+        mrow.pack(fill="x", padx=12, pady=(8, 0))
+        ttk.Label(mrow, text="Sample style:").pack(side="left")
+        self.mode_by_label = {label: key for key, label in config.SAMPLE_MODES.items()}
+        mode_labels = list(self.mode_by_label)
+        default_mode_label = config.SAMPLE_MODES[config.DEFAULT_SAMPLE_MODE]
+        self.sample_mode_var = tk.StringVar(value=default_mode_label)
+        ttk.Combobox(mrow, textvariable=self.sample_mode_var, values=mode_labels,
+                     state="readonly", width=26).pack(side="left", padx=8)
 
         # --- options -----------------------------------------------------
         self.real_var = tk.BooleanVar(value=False)
@@ -131,18 +142,24 @@ class App(tk.Tk):
         if dataset in ("", "(next)"):
             dataset = None
         names_version = self.names_var.get().strip() or None
+        sample_mode = self.mode_by_label.get(
+            self.sample_mode_var.get(),
+            config.DEFAULT_SAMPLE_MODE,
+        )
 
         self.worker = threading.Thread(target=self._run,
-                                       args=(count, dataset, names_version), daemon=True)
+                                       args=(count, dataset, names_version, sample_mode),
+                                       daemon=True)
         self.worker.start()
         self.after(100, self._poll)
 
-    def _run(self, count, dataset, names_version):
+    def _run(self, count, dataset, names_version, sample_mode):
         """Runs in a background thread."""
         try:
             def cb(done, total, field_type):
                 self.q.put(("progress", done, total, field_type))
             out_dir = generate(count, dataset=dataset, names_version=names_version,
+                               sample_mode=sample_mode,
                                progress_callback=cb, show_bar=False)
             if self.real_var.get():
                 self.q.put(("status", "Merging real data..."))

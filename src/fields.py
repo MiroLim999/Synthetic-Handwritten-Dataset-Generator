@@ -48,6 +48,40 @@ def _vocab(name: str) -> tuple[str, ...]:
     return _load_list(config.VOCAB_DIR / f"{name}.txt")
 
 
+@lru_cache(maxsize=1)
+def _all_resource_values() -> tuple[str, ...]:
+    """All names, places, and vocab entries used for character sampling."""
+    values = []
+    values.extend(_first_names())
+    values.extend(_middle_names())
+    values.extend(_last_names())
+    values.extend(_places())
+    if config.VOCAB_DIR.exists():
+        for path in sorted(config.VOCAB_DIR.glob("*.txt")):
+            values.extend(_load_list(path))
+    return tuple(values)
+
+
+@lru_cache(maxsize=1)
+def _resource_characters() -> tuple[str, ...]:
+    """Characters seen in the configured resource lists, plus date separators."""
+    chars = sorted({
+        ch
+        for value in _all_resource_values()
+        for ch in value
+        if not ch.isspace()
+    })
+    chars.extend(["0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "/", "-", "."])
+    return tuple(dict.fromkeys(chars))
+
+
+def clear_resource_cache() -> None:
+    """Clear cached resource lists after changing config.NAMES_DIR."""
+    _load_list.cache_clear()
+    _all_resource_values.cache_clear()
+    _resource_characters.cache_clear()
+
+
 # ---------------------------------------------------------------------------
 # Date helpers
 # ---------------------------------------------------------------------------
@@ -174,6 +208,29 @@ def cause_of_death() -> str:
     return random.choice(_vocab("cause_of_death"))
 
 
+def character() -> str:
+    """One to four resource-derived characters for character-level samples."""
+    chars = _resource_characters()
+    length = 1 if random.random() < 0.70 else random.randint(2, 4)
+    return "".join(random.choice(chars) for _ in range(length))
+
+
+def numeric() -> str:
+    """Numeric snippets and dates for damaged digit training."""
+    roll = random.random()
+    if roll < 0.35:
+        return date_numeric()
+    if roll < 0.55:
+        return age()
+    length = random.randint(1, 6)
+    if length >= 4 and random.random() < 0.35:
+        sep = random.choice(["-", "/", "."])
+        left = "".join(str(random.randint(0, 9)) for _ in range(random.randint(1, 3)))
+        right = "".join(str(random.randint(0, 9)) for _ in range(random.randint(1, 3)))
+        return f"{left}{sep}{right}"
+    return "".join(str(random.randint(0, 9)) for _ in range(length))
+
+
 # Maps the field-type names used in config.FIELD_WEIGHTS to their generators.
 GENERATORS = {
     "full_name": full_name,
@@ -187,6 +244,8 @@ GENERATORS = {
     "citizenship": citizenship,
     "occupation": occupation,
     "cause_of_death": cause_of_death,
+    "character": character,
+    "numeric": numeric,
 }
 
 

@@ -65,7 +65,92 @@ def _stains(img: Image.Image) -> Image.Image:
     return img
 
 
-def degrade(img: Image.Image) -> Image.Image:
+def _ink_bbox(img: Image.Image) -> tuple[int, int, int, int]:
+    """Approximate bounding box around dark ink pixels."""
+    gray = np.asarray(img.convert("L"))
+    ys, xs = np.where(gray < 220)
+    if len(xs) == 0 or len(ys) == 0:
+        return (0, 0, img.width, img.height)
+    pad = 2
+    return (
+        max(0, int(xs.min()) - pad),
+        max(0, int(ys.min()) - pad),
+        min(img.width, int(xs.max()) + pad),
+        min(img.height, int(ys.max()) + pad),
+    )
+
+
+def _ink_gaps(img: Image.Image) -> Image.Image:
+    """Erase tiny local pieces of strokes to mimic broken characters."""
+    img = img.convert("RGB")
+    draw = ImageDraw.Draw(img, "RGBA")
+    gray = np.asarray(img.convert("L"))
+    ys, xs = np.where(gray < 210)
+    if len(xs) == 0 or len(ys) == 0:
+        return img
+
+    min_gap, max_gap = config.BROKEN_INK_GAP_SIZE
+    for _ in range(random.randint(*config.BROKEN_INK_GAP_COUNT)):
+        w = random.randint(min_gap, max_gap)
+        h = random.randint(1, max(2, max_gap // 2))
+        idx = random.randrange(len(xs))
+        x = int(xs[idx])
+        y = int(ys[idx])
+        fill = random.choice([(255, 255, 255), (248, 242, 220), (238, 228, 200)])
+        alpha = random.randint(175, 255)
+        box = [x - w // 2, y - h // 2, x + w // 2, y + h // 2]
+        if random.random() < 0.35:
+            draw.ellipse(box, fill=fill + (alpha,))
+        else:
+            draw.rectangle(box, fill=fill + (alpha,))
+    return img
+
+
+def _scratches(img: Image.Image) -> Image.Image:
+    """Draw faint paper-colored scratches across parts of the text."""
+    img = img.convert("RGB")
+    draw = ImageDraw.Draw(img, "RGBA")
+    w, h = img.size
+    x0, y0, x1, y1 = _ink_bbox(img)
+    for _ in range(random.randint(*config.BROKEN_SCRATCH_COUNT)):
+        length = random.randint(max(8, w // 5), max(10, w))
+        angle = random.uniform(-0.35, 0.35)
+        sx = random.randint(0, max(0, w - 1))
+        sy = random.randint(max(0, y0 - 3), min(h - 1, max(y0, y1 + 3)))
+        ex = sx + int(length)
+        ey = sy + int(length * angle)
+        fill = random.choice([(250, 246, 226), (238, 230, 205), (225, 214, 185)])
+        draw.line((sx, sy, ex, ey), fill=fill + (random.randint(120, 230),),
+                  width=random.randint(1, 3))
+    return img
+
+
+def _erode_ink(img: Image.Image) -> Image.Image:
+    """Lightly shrink dark strokes so some thin parts disappear."""
+    eroded = img.filter(ImageFilter.MaxFilter(3))
+    return Image.blend(img.convert("RGB"), eroded.convert("RGB"),
+                       random.uniform(*config.BROKEN_ERODE_BLEND))
+
+
+def _broken_contrast(img: Image.Image) -> Image.Image:
+    factor = random.uniform(*config.BROKEN_CONTRAST_RANGE)
+    return ImageEnhance.Contrast(img).enhance(factor)
+
+
+def _semi_broken(img: Image.Image) -> Image.Image:
+    """Apply extra localized damage for semi-broken text samples."""
+    if random.random() < config.BROKEN_CONTRAST_PROB:
+        img = _broken_contrast(img)
+    if random.random() < config.BROKEN_ERODE_PROB:
+        img = _erode_ink(img)
+    if random.random() < config.BROKEN_INK_GAP_PROB:
+        img = _ink_gaps(img)
+    if random.random() < config.BROKEN_SCRATCH_PROB:
+        img = _scratches(img)
+    return img
+
+
+def degrade(img: Image.Image, damage_profile: str = "regular") -> Image.Image:
     """Apply the full random augmentation chain."""
     if random.random() < config.AUG_FADE_PROB:
         img = _fade(img)
@@ -75,6 +160,8 @@ def degrade(img: Image.Image) -> Image.Image:
         img = _paper_tint(img)
     if random.random() < config.AUG_STAIN_PROB:
         img = _stains(img)
+    if damage_profile == "semi_broken":
+        img = _semi_broken(img)
     if random.random() < config.AUG_ROTATE_PROB:
         img = _rotate(img)
     if random.random() < config.AUG_BLUR_PROB:

@@ -18,7 +18,7 @@ dataset/
     ├── dataset_001/
     │   ├── train/  val/  test/    # cropped field images, already split
     │   ├── labels.csv             # filename, label, split
-    │   └── manifest.csv           # filename, label, split, field_type, font
+    │   └── manifest.csv           # filename, label, split, field_type, font, sample_mode
     ├── dataset_002/
     └── ...
 ```
@@ -68,8 +68,14 @@ python -m src.generate_synthetic --count 200
 python -m src.generate_synthetic --count 5000 --dataset 2
 python -m src.generate_synthetic --count 200 --dataset my_test_run
 
+# generate damaged text for old/broken records
+python -m src.generate_synthetic --count 2000 --mode semi_broken_mixed
+python -m src.generate_synthetic --count 1000 --mode semi_broken_characters
+python -m src.generate_synthetic --count 1000 --mode semi_broken_numerics
+
 # later: merge real data (by writer) into the latest dataset
 python -m src.build_splits
 ```
 
+Use the GUI's **Sample style** dropdown for the same modes without the terminal.
 See `config.py` for all settings (sizes, paths, augmentation, field weights).
