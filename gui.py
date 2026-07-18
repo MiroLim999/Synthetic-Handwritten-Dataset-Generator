@@ -299,10 +299,20 @@ class App(tk.Tk):
         self.timer = ttk.Label(info_row, text="", style="Timer.TLabel")
         self.timer.pack(side="right")
 
-        # ---- Generate button ---------------------------------------------
-        self.btn = ttk.Button(self, text="⚡  Generate Dataset",
+        # ---- Buttons row -------------------------------------------------
+        btn_row = ttk.Frame(self)
+        btn_row.pack(pady=(4, 16))
+
+        self.btn = ttk.Button(btn_row, text="⚡  Generate Dataset",
                               style="Generate.TButton", command=self.start)
-        self.btn.pack(pady=(4, 16))
+        self.btn.pack(side="left", padx=(0, 8))
+
+        self.open_btn = ttk.Button(btn_row, text="📂  Open Folder",
+                                   style="Quick.TButton", command=self._open_output,
+                                   state="disabled")
+        self.open_btn.pack(side="left")
+
+        self._last_output = None   # path of the last finished dataset
 
     # ------------------------------------------------------------------
     # Event: font style changed
@@ -313,6 +323,20 @@ class App(tk.Tk):
         else:
             self.cursive_row.pack_forget()
             self.cursive_group_var.set("All cursive")
+
+    # ------------------------------------------------------------------
+    # Open output folder / zip in Explorer
+    # ------------------------------------------------------------------
+    def _open_output(self):
+        if not self._last_output:
+            return
+        import subprocess
+        path = self._last_output
+        # If it's a .zip, select it in the parent folder; otherwise open the folder.
+        if path.endswith(".zip"):
+            subprocess.Popen(["explorer", "/select,", path])
+        else:
+            subprocess.Popen(["explorer", path])
 
     # ------------------------------------------------------------------
     # Helpers
@@ -339,6 +363,8 @@ class App(tk.Tk):
             return
 
         self.btn.config(state="disabled")
+        self.open_btn.config(state="disabled")
+        self._last_output = None
         self.progress.config(maximum=count, value=0)
         self.status.config(text="Starting…", foreground=WARNING)
         self.timer.config(text="")
@@ -421,6 +447,8 @@ class App(tk.Tk):
                     self.timer.config(
                         text=f"Total time: {self._fmt(total_time)}")
                     self.btn.config(state="normal")
+                    self._last_output = msg[2]
+                    self.open_btn.config(state="normal")
                     messagebox.showinfo(
                         "Generation complete",
                         f"Generated {msg[1]:,} samples in {self._fmt(total_time)}.\n\nOutput:\n{msg[2]}")
