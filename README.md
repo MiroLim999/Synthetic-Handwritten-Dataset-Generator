@@ -50,6 +50,29 @@ its correct text label.
 
 ---
 
+## Handwriting fonts
+
+The toolkit ships with **24 handwriting fonts** (20 cursive, 4 print/sketch),
+all tuned toward mid-1900s Philippine civil registry penmanship.
+
+### Cursive style groups
+
+| Group | Fonts | Best for |
+|---|---|---|
+| **Palmer / School cursive** | Licorice, Yellowtail, Dancing Script, Carattere, Norican | Filipino school cursive, old registry entries |
+| **Elegant calligraphy** | Great Vibes, Sacramento, Tangerine, Pinyon Script, Allura, Monsieur La Doulaise, Mr De Haviland, Ruthie | Formal certificates, signatures |
+| **Clean semi-formal** | Satisfy, Courgette, Alex Brush, Cookie, Yeseva One | General cursive handwriting |
+| **Loose informal** | Homemade Apple, Carattere, Dancing Script | Casual or hurried entries |
+| **Display / decorative** | Pacifico, Norican, Yeseva One | Headers, decorative text |
+
+### Print / sketch fonts
+Gochi Hand, Indie Flower, Kalam, Rock Salt — used only when **Font style = All fonts**.
+
+Drop additional `.ttf` / `.otf` files into `resources/fonts/` and they will be
+picked up automatically on the next run.
+
+---
+
 ## Setup
 
 Uses the existing `trocr` conda environment, or install deps directly:
@@ -73,9 +96,42 @@ python -m src.generate_synthetic --count 2000 --mode semi_broken_mixed
 python -m src.generate_synthetic --count 1000 --mode semi_broken_characters
 python -m src.generate_synthetic --count 1000 --mode semi_broken_numerics
 
+# restrict to cursive fonts only
+python -m src.generate_synthetic --count 5000 --font-style cursive
+
 # later: merge real data (by writer) into the latest dataset
 python -m src.build_splits
 ```
 
-Use the GUI's **Sample style** dropdown for the same modes without the terminal.
+### Font style flag
+
+| `--font-style` | Effect |
+|---|---|
+| `all` (default) | All 24 handwriting fonts |
+| `cursive` | Only the 20 cursive/script fonts |
+
+Specific cursive sub-groups are selectable in the GUI only.
+
+---
+
+## GUI
+
+Launch by double-clicking `Generate Images.bat` or running:
+
+```bash
+python gui.py
+```
+
+The GUI features a modern dark theme and exposes all generation options:
+
+- **Samples** — count + quick-pick buttons (1k / 5k / 20k / 40k)
+- **Dataset folder** — name, number, or auto-next
+- **Names pool** — switch between name versions
+- **Sample mode** — regular or semi-broken variants
+- **Font style** — All fonts / Cursive only
+  - When *Cursive only* is selected, a second dropdown lets you pick a specific
+    cursive style group (Palmer / Elegant / Semi-formal / Loose / Decorative)
+- **Options** — merge real data, package as .zip
+- **Progress bar** — live count, percentage, field type, speed, and ETA
+
 See `config.py` for all settings (sizes, paths, augmentation, field weights).

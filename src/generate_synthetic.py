@@ -36,7 +36,7 @@ from tqdm import tqdm
 import config
 from src import fields
 from src.augment import degrade
-from src.render import render_text, available_fonts
+from src.render import render_text, available_fonts, fonts_for_style, FONT_STYLE_ALL
 
 
 def _normalize_sample_mode(sample_mode: str | None) -> str:
@@ -105,6 +105,8 @@ def _split_assignments(count: int) -> list[str]:
 def generate(count: int, dataset=None, seed: int = config.RANDOM_SEED,
              names_version: str = None,
              sample_mode: str = config.DEFAULT_SAMPLE_MODE,
+             font_style: str = FONT_STYLE_ALL,
+             cursive_group: str = "",
              progress_callback=None, show_bar: bool = True):
     """
     Generate `count` synthetic samples into a numbered dataset folder.
@@ -118,6 +120,13 @@ def generate(count: int, dataset=None, seed: int = config.RANDOM_SEED,
     sample_mode:
         regular / semi_broken_mixed / semi_broken_words /
         semi_broken_characters / semi_broken_numerics
+    font_style:
+        'all'     -> use every available handwriting font (default)
+        'cursive' -> restrict to cursive/script fonts only
+    cursive_group:
+        Sub-style group name (only used when font_style == 'cursive').
+        E.g. 'Palmer / School cursive', 'Elegant calligraphy', etc.
+        Empty string means all cursive fonts.
 
     Returns the output Path of the dataset folder that was created.
     """
@@ -139,13 +148,17 @@ def generate(count: int, dataset=None, seed: int = config.RANDOM_SEED,
         split_dirs[split] = d
 
     # Intro info BEFORE the bar starts, so the user immediately sees what's running.
-    n_fonts = len(available_fonts())
+    n_fonts = len(fonts_for_style(font_style, cursive_group))
+    font_info = f"{n_fonts} fonts  (style: {font_style}"
+    if font_style == "cursive" and cursive_group:
+        font_info += f" / {cursive_group}"
+    font_info += ")"
     print(f"Generating {count:,} synthetic samples")
     print(f"  output : {out_dir}")
     print(f"  splits : {', '.join(config.SPLIT_NAMES)}")
     print(f"  names  : {config.NAMES_VERSION}")
     print(f"  mode   : {config.SAMPLE_MODES[sample_mode]}")
-    print(f"  fonts  : {n_fonts} handwriting fonts")
+    print(f"  fonts  : {font_info}")
     print()
 
     manifest_rows = []
@@ -169,7 +182,7 @@ def generate(count: int, dataset=None, seed: int = config.RANDOM_SEED,
 
     for i, (field_type, split) in iterator:
         label = fields.make_value(field_type)
-        img, font_used = render_text(label)
+        img, font_used = render_text(label, font_style=font_style, cursive_group=cursive_group)
         img = degrade(img, damage_profile=damage_profile)
 
         file_name = f"syn_{i:06d}.png"
@@ -264,6 +277,9 @@ def main():
     parser.add_argument("--mode", type=str, default=config.DEFAULT_SAMPLE_MODE,
                         choices=list(config.SAMPLE_MODES),
                         help="sample style to generate")
+    parser.add_argument("--font-style", type=str, default=FONT_STYLE_ALL,
+                        choices=["all", "cursive"],
+                        help="font pool: 'all' (default) or 'cursive' only")
     parser.add_argument("--seed", type=int, default=config.RANDOM_SEED)
     parser.add_argument("--zip", action="store_true",
                         help="also package the finished dataset as a .zip archive")
@@ -272,7 +288,7 @@ def main():
     args = parser.parse_args()
 
     out_dir = generate(args.count, args.dataset, args.seed, names_version=args.names,
-                       sample_mode=args.mode)
+                       sample_mode=args.mode, font_style=args.font_style)
     if args.zip or args.zip_only:
         zip_dataset(out_dir, remove_dir=args.zip_only)
 
