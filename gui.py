@@ -55,7 +55,8 @@ class App(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("Civil Registry Dataset Generator")
-        self.geometry("1040x660")
+        self.geometry("1040x740")
+        self.minsize(1040, 740)
         self.resizable(False, False)
         self.configure(bg=BG)
 
@@ -386,7 +387,7 @@ class App(tk.Tk):
         self.preview_holder = tk.Frame(pcard, bg=PREVIEW_BG,
                                        highlightbackground=BORDER,
                                        highlightthickness=1, bd=0,
-                                       height=300)
+                                       height=280)
         self.preview_holder.pack(fill="both", expand=True)
         self.preview_holder.pack_propagate(False)
         self.preview_label = tk.Label(self.preview_holder, bg=PREVIEW_BG,
