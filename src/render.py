@@ -155,17 +155,44 @@ def fonts_for_style(font_style: str, cursive_group: str = "") -> tuple[str, ...]
     return available_fonts()
 
 
+def font_display_name(path) -> str:
+    """Human-friendly name for a font file, e.g. 'greatvibes-regular' -> 'Great Vibes'."""
+    stem = Path(path).stem
+    for suffix in ("-regular", "_regular"):
+        if stem.lower().endswith(suffix):
+            stem = stem[: -len(suffix)]
+            break
+    return stem.replace("-", " ").replace("_", " ").title().strip()
+
+
+def font_path_for(name_or_stem: str) -> str | None:
+    """Resolve a font filename/stem to its full path within the available pool."""
+    if not name_or_stem:
+        return None
+    target = Path(name_or_stem).stem.lower()
+    for p in available_fonts():
+        if Path(p).stem.lower() == target:
+            return p
+    return None
+
+
 def render_text(text: str, font_style: str = FONT_STYLE_ALL,
-                cursive_group: str = "") -> tuple[Image.Image, str]:
+                cursive_group: str = "",
+                specific_font: str = "") -> tuple[Image.Image, str]:
     """
     Render `text` in a random handwriting font on a white background.
 
     font_style:   'all' | 'cursive'
     cursive_group: sub-style group name when font_style == 'cursive'
+    specific_font: exact font filename/stem to use (overrides the pool)
 
     Returns (image, font_path_used).
     """
     pool = fonts_for_style(font_style, cursive_group)
+    if specific_font:
+        fp = font_path_for(specific_font)
+        if fp:
+            pool = (fp,)
     font_path = random.choice(pool)
     font_size = random.randint(*config.FONT_SIZE_RANGE)
     font = ImageFont.truetype(font_path, font_size)

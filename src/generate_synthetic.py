@@ -107,6 +107,7 @@ def generate(count: int, dataset=None, seed: int = config.RANDOM_SEED,
              sample_mode: str = config.DEFAULT_SAMPLE_MODE,
              font_style: str = FONT_STYLE_ALL,
              cursive_group: str = "",
+             specific_font: str = "",
              progress_callback=None, show_bar: bool = True):
     """
     Generate `count` synthetic samples into a numbered dataset folder.
@@ -127,6 +128,9 @@ def generate(count: int, dataset=None, seed: int = config.RANDOM_SEED,
         Sub-style group name (only used when font_style == 'cursive').
         E.g. 'Palmer / School cursive', 'Elegant calligraphy', etc.
         Empty string means all cursive fonts.
+    specific_font:
+        Exact font filename/stem to render every sample in. Empty means
+        use the whole pool selected by font_style / cursive_group.
 
     Returns the output Path of the dataset folder that was created.
     """
@@ -148,11 +152,14 @@ def generate(count: int, dataset=None, seed: int = config.RANDOM_SEED,
         split_dirs[split] = d
 
     # Intro info BEFORE the bar starts, so the user immediately sees what's running.
-    n_fonts = len(fonts_for_style(font_style, cursive_group))
-    font_info = f"{n_fonts} fonts  (style: {font_style}"
-    if font_style == "cursive" and cursive_group:
-        font_info += f" / {cursive_group}"
-    font_info += ")"
+    if specific_font:
+        font_info = f"single font: {specific_font}"
+    else:
+        n_fonts = len(fonts_for_style(font_style, cursive_group))
+        font_info = f"{n_fonts} fonts  (style: {font_style}"
+        if font_style == "cursive" and cursive_group:
+            font_info += f" / {cursive_group}"
+        font_info += ")"
     print(f"Generating {count:,} synthetic samples")
     print(f"  output : {out_dir}")
     print(f"  splits : {', '.join(config.SPLIT_NAMES)}")
@@ -182,7 +189,9 @@ def generate(count: int, dataset=None, seed: int = config.RANDOM_SEED,
 
     for i, (field_type, split) in iterator:
         label = fields.make_value(field_type)
-        img, font_used = render_text(label, font_style=font_style, cursive_group=cursive_group)
+        img, font_used = render_text(label, font_style=font_style,
+                                     cursive_group=cursive_group,
+                                     specific_font=specific_font)
         img = degrade(img, damage_profile=damage_profile)
 
         file_name = f"syn_{i:06d}.png"
