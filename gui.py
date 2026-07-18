@@ -424,12 +424,15 @@ class App(tk.Tk):
         tree_wrap = ttk.Frame(card, style="Card.TFrame")
         tree_wrap.pack(fill="both", expand=True)
 
-        self.tree = ttk.Treeview(tree_wrap, columns=("archive",),
+        self.tree = ttk.Treeview(tree_wrap,
+                                 columns=("folder_size", "zip_size"),
                                  show="tree headings", height=12, selectmode="browse")
-        self.tree.heading("#0", text="Dataset")
-        self.tree.heading("archive", text="Archive")
-        self.tree.column("#0", width=340, anchor="w")
-        self.tree.column("archive", width=140, anchor="center")
+        self.tree.heading("#0",          text="Dataset")
+        self.tree.heading("folder_size", text="Folder size")
+        self.tree.heading("zip_size",    text="Zip size")
+        self.tree.column("#0",          width=280, anchor="w")
+        self.tree.column("folder_size", width=110, anchor="center")
+        self.tree.column("zip_size",    width=110, anchor="center")
         self.tree.pack(side="left", fill="both", expand=True)
         self.tree.bind("<Double-1>", lambda e: self._open_selected_dataset())
 
@@ -438,8 +441,8 @@ class App(tk.Tk):
         self.tree.configure(yscrollcommand=vsb.set)
 
         hint = ttk.Label(parent,
-                         text="A 📦 tag means a .zip archive exists next to the folder. "
-                              "Deleting a dataset also deletes its .zip.",
+                         text="📦 = .zip archive exists alongside the folder.  "
+                              "Deleting a dataset also removes its .zip.",
                          style="Sub.TLabel")
         hint.pack(anchor="w", padx=16, pady=(2, 8))
 
@@ -569,10 +572,43 @@ class App(tk.Tk):
     # Datasets manager
     # ------------------------------------------------------------------
     @staticmethod
+    def _fmt_size(bytes_: int) -> str:
+        """Format a byte count as MB or GB with one decimal place."""
+        if bytes_ < 0:
+            return "—"
+        mb = bytes_ / (1024 ** 2)
+        if mb >= 1024:
+            return f"{mb / 1024:.1f} GB"
+        return f"{mb:.1f} MB"
+
+    @staticmethod
+    def _folder_size_fast(path) -> int:
+        """
+        Fast folder size using os.scandir recursion.
+        Avoids Path.rglob() overhead on large trees.
+        """
+        total = 0
+        try:
+            stack = [str(path)]
+            while stack:
+                with os.scandir(stack.pop()) as it:
+                    for entry in it:
+                        if entry.is_file(follow_symlinks=False):
+                            total += entry.stat().st_size
+                        elif entry.is_dir(follow_symlinks=False):
+                            stack.append(entry.path)
+        except Exception:
+            return -1
+        return total
+
+    @staticmethod
     def _zip_for(folder):
         """Sibling .zip path for a dataset folder."""
         return folder.parent / (folder.name + ".zip")
 
+    # ------------------------------------------------------------------
+    # Datasets list — two-phase: instant skeleton, background sizes
+    # ------------------------------------------------------------------
     def _refresh_datasets(self):
         if not hasattr(self, "tree"):
             return
@@ -585,12 +621,33 @@ class App(tk.Tk):
         folders = [p for p in base.iterdir() if p.is_dir()]
         folders.sort(key=lambda p: p.stat().st_mtime, reverse=True)
 
+        # Phase 1: insert rows immediately with placeholder sizes
+        iid_folder = []
         for folder in folders:
-            has_zip = self._zip_for(folder).exists()
-            tag = "📦 .zip" if has_zip else "—"
-            iid = self.tree.insert("", "end", text=f"  📁  {folder.name}",
-                                   values=(tag,))
+            zip_path = self._zip_for(folder)
+            has_zip = zip_path.exists()
+            label = f"  {'📦' if has_zip else '📁'}  {folder.name}"
+            iid = self.tree.insert("", "end", text=label,
+                                   values=("…", "…" if has_zip else "—"))
             self._dataset_paths[iid] = folder
+            iid_folder.append((iid, folder, zip_path, has_zip))
+
+        # Phase 2: compute sizes off the UI thread, patch back via after()
+        def _compute():
+            for iid, folder, zip_path, has_zip in iid_folder:
+                folder_sz = self._fmt_size(self._folder_size_fast(folder))
+                zip_sz = (self._fmt_size(zip_path.stat().st_size)
+                          if has_zip else "—")
+                self.after(0, self._patch_row, iid, folder_sz, zip_sz)
+
+        threading.Thread(target=_compute, daemon=True).start()
+
+    def _patch_row(self, iid, folder_sz, zip_sz):
+        """Update a single treeview row with computed sizes (runs on UI thread)."""
+        try:
+            self.tree.item(iid, values=(folder_sz, zip_sz))
+        except tk.TclError:
+            pass  # row was deleted before size came back
 
     def _selected_dataset(self):
         sel = self.tree.selection()
