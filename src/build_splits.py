@@ -361,7 +361,7 @@ def _record_assignment(
         )
     assignments[writer_id] = split
 
-
+#nice
 def _load_writer_assignments(
     path: Path, existing_real_rows: list[dict[str, str]]
 ) -> dict[str, str]:
