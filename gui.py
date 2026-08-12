@@ -22,7 +22,13 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from PIL import Image, ImageDraw, ImageFont, ImageTk
 
+import random
+
 import config
+from src.augment import degrade, EDGE_CLIPPING_RANGES
+from src.generation_profiles import (AUGMENTATION_PROFILES,
+                                     create_custom_augmentation_profile,
+                                     get_augmentation_profile)
 from src.generate_synthetic import (GenerationCancelled, generate,
                                     guarded_remove_dataset, zip_dataset)
 from src.build_splits import build
@@ -454,6 +460,81 @@ class App(tk.Tk):
         self.sample_mode_cb.pack(side="left")
         self._run_controls.append(self.sample_mode_cb)
 
+        # Degradation Profile Dropdown
+        deg_row = ttk.Frame(card2, style="Card.TFrame")
+        deg_row.pack(fill="x", pady=(0, 8))
+        ttk.Label(deg_row, text="Degradation", style="CardLabel.TLabel", width=13).pack(side="left")
+        self.degradation_by_label = {label: key for key, label in config.DEGRADATION_PROFILES.items()}
+        degradation_labels = list(self.degradation_by_label)
+        self.degradation_var = tk.StringVar(value=config.DEGRADATION_PROFILES[config.DEFAULT_DEGRADATION_PROFILE])
+        self.degradation_cb = ttk.Combobox(
+            deg_row, textvariable=self.degradation_var, values=degradation_labels,
+            state="readonly", width=26)
+        self.degradation_cb.pack(side="left")
+        self.degradation_cb.bind("<<ComboboxSelected>>", self._on_degradation_preset_change)
+        self._run_controls.append(self.degradation_cb)
+
+        # Character Cutoff / Edge Clipping Dropdown
+        clip_row = ttk.Frame(card2, style="Card.TFrame")
+        clip_row.pack(fill="x", pady=(0, 8))
+        ttk.Label(clip_row, text="Char cutoff", style="CardLabel.TLabel", width=13).pack(side="left")
+        self.clipping_by_label = {label: key for key, label in config.EDGE_CLIPPING_OPTIONS.items()}
+        clipping_labels = list(self.clipping_by_label)
+        self.edge_clipping_var = tk.StringVar(value=config.EDGE_CLIPPING_OPTIONS[config.DEFAULT_EDGE_CLIPPING])
+        self.edge_clipping_cb = ttk.Combobox(
+            clip_row, textvariable=self.edge_clipping_var, values=clipping_labels,
+            state="readonly", width=26)
+        self.edge_clipping_cb.pack(side="left")
+        self.edge_clipping_cb.bind("<<ComboboxSelected>>", self._on_clipping_preset_change)
+        self._run_controls.append(self.edge_clipping_cb)
+
+        # ---- Developer Studio (Custom Parameters) -----------------------
+        self._section_label(left, "Developer Studio (Custom Parameters)")
+        card_dev = self._card(left, pady=(0, 4))
+
+        self.dev_sliders = {}
+        self.dev_labels = {}
+        self._slider_updating = False
+
+        def _make_slider(parent, name, label_text, from_, to_, default, resolution=0.01, unit=""):
+            row = ttk.Frame(parent, style="Card.TFrame")
+            row.pack(fill="x", pady=(0, 4))
+            ttk.Label(row, text=label_text, style="CardLabel.TLabel", width=13).pack(side="left")
+            val_var = tk.DoubleVar(value=default)
+            lbl_var = tk.StringVar(value=f"{default:.2f}{unit}" if resolution < 1.0 else f"{int(default)}{unit}")
+
+            def _on_move(val):
+                if getattr(self, "_slider_updating", False):
+                    return
+                v = float(val)
+                lbl_var.set(f"{v:.2f}{unit}" if resolution < 1.0 else f"{int(v)}{unit}")
+                self._on_developer_slider_change(name)
+
+            scale = ttk.Scale(row, from_=from_, to=to_, variable=val_var, command=_on_move)
+            scale.pack(side="left", fill="x", expand=True, padx=(0, 6))
+            ttk.Label(row, textvariable=lbl_var, style="CardHint.TLabel", width=7).pack(side="left")
+            self.dev_sliders[name] = val_var
+            self.dev_labels[name] = lbl_var
+            self._run_controls.append(scale)
+
+        _make_slider(card_dev, "fade", "Ink Fading", 0.10, 1.00, 0.65)
+        _make_slider(card_dev, "tint", "Paper Tint", 0.00, 0.40, 0.15)
+        _make_slider(card_dev, "stain", "Stain Prob", 0.00, 1.00, 0.35)
+        _make_slider(card_dev, "rotate", "Tilt Angle", 0.0, 12.0, 4.5, unit="°")
+        _make_slider(card_dev, "blur", "Blur Radius", 0.0, 3.0, 0.8, unit="px")
+        _make_slider(card_dev, "noise", "Grain Noise", 0.0, 40.0, 12.0, resolution=1.0)
+        _make_slider(card_dev, "texture", "Paper Fiber", 0.0, 12.0, 3.5)
+        _make_slider(card_dev, "scanline", "Scanlines", 0.0, 30.0, 10.0, resolution=1.0)
+        _make_slider(card_dev, "jpeg", "JPEG Quality", 20.0, 100.0, 75.0, resolution=1.0)
+
+        ttk.Separator(card_dev, orient="horizontal").pack(fill="x", pady=6)
+        ttk.Label(card_dev, text="Character Cutoff / Edge Crops", style="Sub.TLabel").pack(anchor="w", pady=(0, 4))
+
+        _make_slider(card_dev, "crop_top", "Top Cut %", 0.0, 15.0, 0.0, resolution=1.0, unit="%")
+        _make_slider(card_dev, "crop_bottom", "Bottom Cut %", 0.0, 15.0, 0.0, resolution=1.0, unit="%")
+        _make_slider(card_dev, "crop_left", "Left Cut %", 0.0, 15.0, 0.0, resolution=1.0, unit="%")
+        _make_slider(card_dev, "crop_right", "Right Cut %", 0.0, 15.0, 0.0, resolution=1.0, unit="%")
+
         frow = ttk.Frame(card2, style="Card.TFrame")
         frow.pack(fill="x", pady=(0, 8))
         ttk.Label(frow, text="Font style", style="CardLabel.TLabel", width=13).pack(side="left")
@@ -687,8 +768,109 @@ class App(tk.Tk):
             self._preview_img = None
             self.preview_label.config(image="", text="(no preview available)")
             return
+
+        profile = self._build_custom_developer_profile()
+        crop_tuple = self._get_custom_crop_tuple()
+        try:
+            img = degrade(
+                img,
+                augmentation_profile=profile,
+                edge_clipping=crop_tuple,
+                rng=random.Random(42),
+            )
+        except Exception:
+            pass
         self._preview_img = ImageTk.PhotoImage(img)
         self.preview_label.config(image=self._preview_img, text="")
+
+    def _build_custom_developer_profile(self):
+        if not hasattr(self, "dev_sliders"):
+            degradation_key = self.degradation_by_label.get(
+                self.degradation_var.get(), config.DEFAULT_DEGRADATION_PROFILE
+            )
+            return get_augmentation_profile(degradation_key)
+
+        preset_key = self.degradation_by_label.get(self.degradation_var.get(), "")
+        if preset_key and preset_key != "custom_dev_v1" and preset_key in AUGMENTATION_PROFILES:
+            return get_augmentation_profile(preset_key)
+
+        return create_custom_augmentation_profile(
+            fade_contrast=self.dev_sliders["fade"].get(),
+            paper_tint_alpha=self.dev_sliders["tint"].get(),
+            stain_prob=self.dev_sliders["stain"].get(),
+            rotate_deg=self.dev_sliders["rotate"].get(),
+            blur_radius=self.dev_sliders["blur"].get(),
+            noise_std=self.dev_sliders["noise"].get(),
+            paper_texture_std=self.dev_sliders["texture"].get(),
+            scanline_alpha=int(round(self.dev_sliders["scanline"].get())),
+            jpeg_quality=int(round(self.dev_sliders["jpeg"].get())),
+        )
+
+    def _get_custom_crop_tuple(self):
+        if not hasattr(self, "dev_sliders"):
+            preset_key = self.clipping_by_label.get(self.edge_clipping_var.get(), "none")
+            return preset_key
+
+        preset_key = self.clipping_by_label.get(self.edge_clipping_var.get(), "")
+        if preset_key and preset_key != "custom":
+            return preset_key
+
+        top_p = self.dev_sliders["crop_top"].get() / 100.0
+        bottom_p = self.dev_sliders["crop_bottom"].get() / 100.0
+        left_p = self.dev_sliders["crop_left"].get() / 100.0
+        right_p = self.dev_sliders["crop_right"].get() / 100.0
+        if top_p <= 0 and bottom_p <= 0 and left_p <= 0 and right_p <= 0:
+            return "none"
+        return (top_p, bottom_p, left_p, right_p)
+
+    def _on_degradation_preset_change(self, _event=None):
+        preset_label = self.degradation_var.get()
+        preset_key = self.degradation_by_label.get(preset_label, "historical_scan_v1")
+        if preset_key in AUGMENTATION_PROFILES and hasattr(self, "dev_sliders"):
+            prof = AUGMENTATION_PROFILES[preset_key]
+            self._slider_updating = True
+            self.dev_sliders["fade"].set((prof.fade_range[0] + prof.fade_range[1]) / 2.0)
+            self.dev_sliders["tint"].set((prof.paper_tint_alpha_range[0] + prof.paper_tint_alpha_range[1]) / 2.0)
+            self.dev_sliders["stain"].set(prof.stain_probability)
+            self.dev_sliders["rotate"].set(prof.rotate_degrees)
+            self.dev_sliders["blur"].set((prof.blur_radius_range[0] + prof.blur_radius_range[1]) / 2.0)
+            self.dev_sliders["noise"].set((prof.noise_std_range[0] + prof.noise_std_range[1]) / 2.0)
+            self.dev_sliders["texture"].set((prof.paper_texture_std_range[0] + prof.paper_texture_std_range[1]) / 2.0)
+            self.dev_sliders["scanline"].set((prof.scanline_alpha_range[0] + prof.scanline_alpha_range[1]) / 2.0)
+            self.dev_sliders["jpeg"].set((prof.jpeg_quality_range[0] + prof.jpeg_quality_range[1]) / 2.0)
+            for k, var in self.dev_sliders.items():
+                if k.startswith("crop_"):
+                    continue
+                v = var.get()
+                unit = "°" if k == "rotate" else ("px" if k == "blur" else "")
+                res = 1.0 if k in ("noise", "scanline", "jpeg") else 0.01
+                self.dev_labels[k].set(f"{v:.2f}{unit}" if res < 1.0 else f"{int(v)}{unit}")
+            self._slider_updating = False
+        self._update_preview()
+
+    def _on_clipping_preset_change(self, _event=None):
+        preset_label = self.edge_clipping_var.get()
+        preset_key = self.clipping_by_label.get(preset_label, "none")
+        if preset_key in EDGE_CLIPPING_RANGES and hasattr(self, "dev_sliders"):
+            r = EDGE_CLIPPING_RANGES[preset_key]
+            avg_pct = round(((r[0] + r[1]) / 2.0) * 100.0)
+            self._slider_updating = True
+            for side in ("crop_top", "crop_bottom", "crop_left", "crop_right"):
+                self.dev_sliders[side].set(avg_pct)
+                self.dev_labels[side].set(f"{int(avg_pct)}%")
+            self._slider_updating = False
+        self._update_preview()
+
+    def _on_developer_slider_change(self, slider_name=""):
+        if getattr(self, "_slider_updating", False):
+            return
+        if slider_name.startswith("crop_"):
+            if "custom" in self.clipping_by_label.values():
+                self.edge_clipping_var.set(config.EDGE_CLIPPING_OPTIONS["custom"])
+        else:
+            if "custom_dev_v1" in self.degradation_by_label.values():
+                self.degradation_var.set(config.DEGRADATION_PROFILES["custom_dev_v1"])
+        self._update_preview()
 
     def _on_font_style_change(self, _event=None):
         if self.font_style_var.get() == "Cursive only":
@@ -1113,6 +1295,8 @@ class App(tk.Tk):
         sample_mode = self.mode_by_label.get(
             self.sample_mode_var.get(), config.DEFAULT_SAMPLE_MODE)
         font_style, cursive_group, specific_font = self._current_font_selection()
+        augmentation_profile = self._build_custom_developer_profile()
+        edge_clipping = self._get_custom_crop_tuple()
         merge_real = bool(self.real_var.get())
         package_zip = bool(self.zip_var.get())
 
@@ -1130,7 +1314,8 @@ class App(tk.Tk):
             target=self._run,
             args=(count, dataset, seed, names_version, sample_mode,
                   font_style, cursive_group, specific_font,
-                  merge_real, package_zip, self.cancel_event),
+                  merge_real, package_zip, self.cancel_event,
+                  augmentation_profile, edge_clipping),
             daemon=False)
         self.worker.start()
 
@@ -1139,7 +1324,9 @@ class App(tk.Tk):
     # ------------------------------------------------------------------
     def _run(self, count, dataset, seed, names_version, sample_mode,
              font_style, cursive_group, specific_font,
-             merge_real, package_zip, cancel_event):
+             merge_real, package_zip, cancel_event,
+             augmentation_profile=config.DEFAULT_DEGRADATION_PROFILE,
+             edge_clipping=config.DEFAULT_EDGE_CLIPPING):
         try:
             def cb(done, total, field_type):
                 self.q.put(("progress", done, total, field_type))
@@ -1150,7 +1337,9 @@ class App(tk.Tk):
                                cursive_group=cursive_group, specific_font=specific_font,
                                progress_callback=cb, show_bar=False,
                                cancel_event=cancel_event,
-                               archive_planned=package_zip)
+                               archive_planned=package_zip,
+                               augmentation_profile=augmentation_profile,
+                               edge_clipping=edge_clipping)
             if cancel_event.is_set():
                 self.q.put(("cancelled", "Generation cancelled safely."))
                 return

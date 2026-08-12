@@ -264,7 +264,8 @@ def _generate_valid_sample(field_type: str, split: str, file_name: str,
                            evaluation_policy, writer_style,
                            augmentation_profile,
                            rng: random.Random,
-                           np_rng: np.random.Generator):
+                           np_rng: np.random.Generator,
+                           edge_clipping: str = "none"):
     """Generate one quality-checked crop, retrying stochastic failures."""
     damage_profile = (
         "semi_broken" if sample_mode.startswith("semi_broken") else "regular"
@@ -295,6 +296,7 @@ def _generate_valid_sample(field_type: str, split: str, file_name: str,
             rng=rng,
             np_rng=np_rng,
             augmentation_profile=augmentation_profile,
+            edge_clipping=edge_clipping,
         )
         image = evaluation_policy.apply_degradation_holdout(
             image, split, sample_key=file_name
@@ -317,7 +319,8 @@ def _run_metadata(*, seed: int, count: int, sample_mode: str,
                   validation_report, evaluation_policy,
                   generation_started_at: str, resource_estimate,
                   writer_profile, augmentation_profile,
-                  counters: GenerationCounters, writer_assigner) -> dict:
+                  counters: GenerationCounters, writer_assigner,
+                  edge_clipping: str = "none") -> dict:
     """Build the complete provenance record written before publication."""
     return {
         "metadata_schema_version": 1,
@@ -338,6 +341,7 @@ def _run_metadata(*, seed: int, count: int, sample_mode: str,
             "font_style": font_style,
             "cursive_group": cursive_group,
             "specific_font": specific_font,
+            "edge_clipping": edge_clipping,
             "font_files": [Path(path).name for path in effective_fonts],
         },
         "preprocessing": {
@@ -468,7 +472,8 @@ def generate(count: int, dataset=None, seed: int = config.RANDOM_SEED,
              cancel_event=None, archive_planned: bool = False,
              writer_profile=DEFAULT_WRITER_PROFILE_ID,
              augmentation_profile=DEFAULT_AUGMENTATION_PROFILE_ID,
-             samples_per_writer: int = 32):
+             samples_per_writer: int = 32,
+             edge_clipping: str = "none"):
     """
     Generate `count` synthetic samples into a numbered dataset folder.
 
@@ -621,6 +626,7 @@ def generate(count: int, dataset=None, seed: int = config.RANDOM_SEED,
                     augmentation_profile,
                     rng,
                     np_rng,
+                    edge_clipping=edge_clipping,
                 )
                 img.save(split_dirs[split] / file_name)
                 manifest_writer.write({
@@ -682,6 +688,7 @@ def generate(count: int, dataset=None, seed: int = config.RANDOM_SEED,
                 augmentation_profile=augmentation_profile,
                 counters=counters,
                 writer_assigner=writer_assigner,
+                edge_clipping=edge_clipping,
             ),
         )
         _raise_if_cancelled(cancel_event)

@@ -62,6 +62,26 @@ SAMPLE_MODES = {
 }
 DEFAULT_SAMPLE_MODE = "regular"
 
+DEGRADATION_PROFILES = {
+    "historical_scan_v1": "Historical scan (default)",
+    "faded_ink": "Faded ink & paper tint",
+    "bleed_through": "Bleed-through & paper texture",
+    "scan_noise": "Scan noise & scanner lines",
+    "heavy_smudge": "Heavy smudge & ink damage",
+    "clean": "Clean (minimal degradation)",
+    "custom_dev_v1": "Custom Developer Studio",
+}
+DEFAULT_DEGRADATION_PROFILE = "historical_scan_v1"
+
+EDGE_CLIPPING_OPTIONS = {
+    "none": "None (0%)",
+    "light": "Light (1-2%)",
+    "moderate": "Moderate (3-5% loop tips)",
+    "heavy": "Heavy (6-9% ascenders/descenders)",
+    "custom": "Custom Crop Percentages",
+}
+DEFAULT_EDGE_CLIPPING = "none"
+
 # Image rendering
 FONT_SIZE_RANGE = (38, 58)        # random font size per sample (px)
 IMAGE_PADDING = 22                # white padding around the text (px)
