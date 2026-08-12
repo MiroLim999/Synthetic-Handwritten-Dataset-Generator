@@ -40,6 +40,7 @@ def load_font(font_path: str | Path, font_size: int):
 def clear_font_cache() -> None:
     """Release cached font objects (useful after changing the font folder)."""
     _cached_truetype.cache_clear()
+    available_fonts.cache_clear()
 
 
 def font_cache_info():
@@ -154,10 +155,11 @@ def available_fonts() -> tuple[str, ...]:
 
 def cursive_fonts() -> tuple[str, ...]:
     """Return only fonts explicitly recognized as cursive/script."""
-    return tuple(
+    fonts = tuple(
         p for p in available_fonts()
         if Path(p).stem.lower() in {s.lower() for s in CURSIVE_FONT_STEMS}
     )
+    return fonts if fonts else available_fonts()
 
 
 def cursive_fonts_for_group(group_name: str) -> tuple[str, ...]:
@@ -172,7 +174,7 @@ def cursive_fonts_for_group(group_name: str) -> tuple[str, ...]:
         p for p in available_fonts()
         if Path(p).stem.lower() in {s.lower() for s in stems}
     )
-    if not group_name:
+    if not group_name or not result:
         return cursive_fonts()
     return result
 
