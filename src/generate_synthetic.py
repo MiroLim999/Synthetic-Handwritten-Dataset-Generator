@@ -26,6 +26,7 @@ Usage:
 """
 
 import argparse
+import concurrent.futures
 import csv
 import hashlib
 import json
@@ -638,63 +639,89 @@ def generate(count: int, dataset=None, seed: int = config.RANDOM_SEED,
         manifest_path = staging_dir / "manifest.csv"
         labels_path = staging_dir / "labels.csv"
         format_source_path = staging_dir / ".evaluation-source.csv"
+
+        def _process_one_item(item):
+            _raise_if_cancelled(cancel_event)
+            i, field_type, split = item.index, item.field_type, item.split
+            file_name = f"syn_{i:06d}.png"
+            synthetic_writer_id = writer_assigner.writer_id_for(split)
+            style = writer_style_for(
+                synthetic_writer_id, seed, writer_profile
+            )
+            # Create thread-local RNGs seeded deterministically per item index
+            item_seed = (seed + i * 1_000_003) & 0x7FFFFFFF
+            item_rng = random.Random(item_seed)
+            item_np_rng = np.random.default_rng(item_seed)
+
+            (label, img, font_used, format_profile,
+             format_id) = _generate_valid_sample(
+                field_type,
+                split,
+                file_name,
+                names_dir,
+                sample_mode,
+                font_style,
+                cursive_group,
+                evaluation_policy,
+                style,
+                augmentation_profile,
+                item_rng,
+                item_np_rng,
+                edge_clipping=edge_clipping,
+                semi_broken_params=semi_broken_params,
+            )
+            out_file = split_dirs[split] / file_name
+            img.save(out_file)
+
+            return (i, file_name, label, split, field_type, font_used, format_profile, format_id)
+
+        workers = max(1, min(os.cpu_count() or 4, 16))
         with (AtomicCsvWriter(manifest_path, MANIFEST_COLUMNS) as manifest_writer,
               AtomicCsvWriter(
                   labels_path, ("filename", "label", "split")) as labels_writer,
               AtomicCsvWriter(
                   format_source_path, FORMAT_SOURCE_COLUMNS) as format_writer):
-            for item in iterator:
-                _raise_if_cancelled(cancel_event)
-                i, field_type, split = item.index, item.field_type, item.split
-                file_name = f"syn_{i:06d}.png"
-                synthetic_writer_id = writer_assigner.writer_id_for(split)
-                style = writer_style_for(
-                    synthetic_writer_id, seed, writer_profile
-                )
-                (label, img, font_used, format_profile,
-                 format_id) = _generate_valid_sample(
-                    field_type,
-                    split,
-                    file_name,
-                    names_dir,
-                    sample_mode,
-                    font_style,
-                    cursive_group,
-                    evaluation_policy,
-                    style,
-                    augmentation_profile,
-                    rng,
-                    np_rng,
-                    edge_clipping=edge_clipping,
-                    semi_broken_params=semi_broken_params,
-                )
-                img.save(split_dirs[split] / file_name)
-                manifest_writer.write({
-                    "filename": file_name,
-                    "label": label,
-                    "split": split,
-                    "source": "synthetic",
-                    "field_type": field_type,
-                    "font": font_used,
-                    "sample_mode": sample_mode,
-                    "writer_id": "",
-                    "schema_version": MANIFEST_SCHEMA_VERSION,
-                })
-                labels_writer.write({
-                    "filename": file_name, "label": label, "split": split,
-                })
-                format_writer.write({
-                    "filename": file_name,
-                    "field_type": field_type,
-                    "format_profile": format_profile,
-                    "format_id": format_id,
-                })
-                counters.observe(split=split, field_type=field_type)
 
-                if progress is not None and i % 50 == 0:
-                    progress.set_postfix_str(f"{split}/{field_type}")
-                if progress_callback is not None:
-                    progress_callback(i, count, field_type)
+            with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
+                futures = {executor.submit(_process_one_item, item): item.index for item in iterator}
+                # Collect results as they complete
+                results = {}
+                done_count = 0
+                for future in concurrent.futures.as_completed(futures):
+                    _raise_if_cancelled(cancel_event)
+                    res = future.result()
+                    results[res[0]] = res
+                    done_count += 1
+                    if progress is not None and done_count % 50 == 0:
+                        progress.update(50)
+                        progress.set_postfix_str(f"{res[3]}/{res[4]}")
+                    if progress_callback is not None:
+                        progress_callback(done_count, count, res[4])
+
+                # Write manifest in exact index order for 100% deterministic outputs
+                for idx in sorted(results.keys()):
+                    (i, file_name, label, split, field_type, font_used, format_profile, format_id) = results[idx]
+                    manifest_writer.write({
+                        "filename": file_name,
+                        "label": label,
+                        "split": split,
+                        "source": "synthetic",
+                        "field_type": field_type,
+                        "font": font_used,
+                        "sample_mode": sample_mode,
+                        "writer_id": "",
+                        "schema_version": MANIFEST_SCHEMA_VERSION,
+                    })
+                    labels_writer.write({
+                        "filename": file_name, "label": label, "split": split,
+                    })
+                    format_writer.write({
+                        "filename": file_name,
+                        "field_type": field_type,
+                        "format_profile": format_profile,
+                        "format_id": format_id,
+                    })
+                    counters.observe(split=split, field_type=field_type)
 
         _raise_if_cancelled(cancel_event)
         _write_evaluation_annotations_streaming(

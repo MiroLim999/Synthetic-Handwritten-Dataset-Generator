@@ -95,3 +95,73 @@ Generating 1,000 synthetic samples
   mode   : Semi-broken: mixed
   fonts  : 3 fonts  (style: cursive / Loose informal)
 
+Generating 1,000 synthetic samples
+  output : C:\Users\limmi\OneDrive\Desktop\synthetic-generator\dataset\datasets\dataset_017
+  splits : train, val, test
+  names  : name1
+  seed   : 43
+  mode   : Regular mixed fields
+  fonts  : 3 fonts  (style: cursive / Loose informal)
+
+
+Generated 1,000 samples -> C:\Users\limmi\OneDrive\Desktop\synthetic-generator\dataset\datasets\dataset_017
+Manifest: C:\Users\limmi\OneDrive\Desktop\synthetic-generator\dataset\datasets\dataset_017\manifest.csv
+
+Split distribution:
+  train  800
+  val    100
+  test   100
+
+Field distribution:
+  full_name      302
+  place          141
+  date_written   129
+  date_numeric   112
+  cause_of_death 84
+  age            58
+  civil_status   47
+  sex            34
+  citizenship    28
+  religion       22
+  occupation     20
+  numeric        12
+  character      11
+Generating 5,000 synthetic samples
+  output : C:\Users\limmi\OneDrive\Desktop\synthetic-generator\dataset\datasets\dataset_018
+  splits : train, val, test
+  names  : name1
+  seed   : 89123
+  mode   : Regular mixed fields
+  fonts  : 3 fonts  (style: cursive / Loose informal)
+
+
+Generated 5,000 samples -> C:\Users\limmi\OneDrive\Desktop\synthetic-generator\dataset\datasets\dataset_018
+Manifest: C:\Users\limmi\OneDrive\Desktop\synthetic-generator\dataset\datasets\dataset_018\manifest.csv
+
+Split distribution:
+  train  4000
+  val    500
+  test   500
+
+Field distribution:
+  full_name      1487
+  place          783
+  date_written   658
+  date_numeric   505
+  cause_of_death 405
+  civil_status   254
+  age            243
+  sex            227
+  religion       133
+  citizenship    115
+  occupation     102
+  character      49
+  numeric        39
+Generating 200,000 synthetic samples
+  output : C:\Users\limmi\OneDrive\Desktop\synthetic-generator\dataset\datasets\dataset_019
+  splits : train, val, test
+  names  : name1
+  seed   : 89123
+  mode   : Regular mixed fields
+  fonts  : 20 fonts  (style: cursive)
+
