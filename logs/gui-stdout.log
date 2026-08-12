@@ -1,0 +1,58 @@
+Generating 100 synthetic samples
+  output : C:\Users\limmi\OneDrive\Desktop\synthetic-generator\dataset\datasets\dataset_014
+  splits : train, val, test
+  names  : name1
+  seed   : 42
+  mode   : Regular mixed fields
+  fonts  : 24 fonts  (style: all)
+
+
+Generated 100 samples -> C:\Users\limmi\OneDrive\Desktop\synthetic-generator\dataset\datasets\dataset_014
+Manifest: C:\Users\limmi\OneDrive\Desktop\synthetic-generator\dataset\datasets\dataset_014\manifest.csv
+
+Split distribution:
+  train  80
+  val    10
+  test   10
+
+Field distribution:
+  full_name      31
+  place          20
+  date_written   15
+  date_numeric   11
+  cause_of_death 8
+  civil_status   5
+  age            5
+  citizenship    2
+  religion       2
+  occupation     1
+Generating 100 synthetic samples
+  output : C:\Users\limmi\OneDrive\Desktop\synthetic-generator\dataset\datasets\dataset_015
+  splits : train, val, test
+  names  : name1
+  seed   : 42
+  mode   : Semi-broken: mixed
+  fonts  : 24 fonts  (style: all)
+
+
+Generated 100 samples -> C:\Users\limmi\OneDrive\Desktop\synthetic-generator\dataset\datasets\dataset_015
+Manifest: C:\Users\limmi\OneDrive\Desktop\synthetic-generator\dataset\datasets\dataset_015\manifest.csv
+
+Split distribution:
+  train  80
+  val    10
+  test   10
+
+Field distribution:
+  full_name      26
+  place          17
+  date_written   13
+  date_numeric   11
+  character      6
+  numeric        6
+  sex            5
+  occupation     5
+  religion       4
+  civil_status   3
+  age            2
+  cause_of_death 2

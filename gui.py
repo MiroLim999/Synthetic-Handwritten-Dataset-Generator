@@ -620,7 +620,7 @@ class App(tk.Tk):
         _make_slider(card_dev, "tint", "Paper Tint", 0.00, 0.40, 0.15)
         _make_slider(card_dev, "stain", "Stain Prob", 0.00, 1.00, 0.35)
         _make_slider(card_dev, "rotate", "Tilt Angle", 0.0, 12.0, 4.5, unit="°")
-        _make_slider(card_dev, "blur", "Blur Radius", 0.0, 3.0, 0.8, unit="px")
+        _make_slider(card_dev, "blur", "Blur Radius", 0.0, 3.0, 0.0, unit="px")
         _make_slider(card_dev, "noise", "Grain Noise", 0.0, 40.0, 12.0, resolution=1.0)
         _make_slider(card_dev, "texture", "Paper Fiber", 0.0, 12.0, 3.5)
         _make_slider(card_dev, "scanline", "Scanlines", 0.0, 30.0, 10.0, resolution=1.0)
@@ -637,6 +637,7 @@ class App(tk.Tk):
         ttk.Separator(card_dev, orient="horizontal").pack(fill="x", pady=6)
         ttk.Label(card_dev, text="Stroke Damage (Semi-Broken)", style="Sub.TLabel").pack(anchor="w", pady=(0, 4))
 
+        _make_slider(card_dev, "contrast", "Contrast Drop", 0.00, 1.00, 0.80)
         _make_slider(card_dev, "gap_prob", "Gap Prob", 0.00, 1.00, 0.90)
         _make_slider(card_dev, "gap_count", "Gap Count", 0.0, 30.0, 16.0, resolution=1.0)
         _make_slider(card_dev, "scratch", "Scratch Prob", 0.00, 1.00, 0.70)
@@ -852,9 +853,9 @@ class App(tk.Tk):
             im = Image.new("RGB", (w + 24, h + 20), PREVIEW_BG)
             d = ImageDraw.Draw(im)
             d.text((12 - box[0], 10 - box[1]), SAMPLE_TEXT, font=font, fill=(35, 40, 55))
-            if im.width > PREVIEW_WIDTH:
-                r = PREVIEW_WIDTH / im.width
-                im = im.resize((PREVIEW_WIDTH, max(1, int(im.height * r))))
+            if im.width > PREVIEW_WIDTH - 24:
+                r = (PREVIEW_WIDTH - 24) / im.width
+                im = im.resize((PREVIEW_WIDTH - 24, max(1, int(im.height * r))), Image.Resampling.LANCZOS)
             rendered.append(im)
 
         if not rendered:
@@ -876,10 +877,10 @@ class App(tk.Tk):
             if specific_font:
                 fp = font_path_for(specific_font)
                 pool = (fp,) if fp else fonts_for_style(font_style, cursive_group)
-                img = self._make_preview_image(pool, lines=1, size=64)
+                img = self._make_preview_image(pool, lines=1, size=52)
             else:
                 pool = fonts_for_style(font_style, cursive_group)
-                img = self._make_preview_image(pool, lines=3, size=42)
+                img = self._make_preview_image(pool, lines=3, size=36)
         except Exception:
             img = None
 
@@ -904,6 +905,7 @@ class App(tk.Tk):
             )
         except Exception:
             pass
+
         self._preview_img = ImageTk.PhotoImage(img)
         self.preview_label.config(image=self._preview_img, text="")
 
@@ -911,6 +913,7 @@ class App(tk.Tk):
         if not hasattr(self, "dev_sliders"):
             return None
         return {
+            "contrast_prob": self.dev_sliders["contrast"].get(),
             "gap_prob": self.dev_sliders["gap_prob"].get(),
             "gap_count": int(round(self.dev_sliders["gap_count"].get())),
             "scratch_prob": self.dev_sliders["scratch"].get(),
@@ -977,7 +980,7 @@ class App(tk.Tk):
                     continue
                 v = var.get()
                 unit = "°" if k == "rotate" else ("px" if k == "blur" else "")
-                res = 1.0 if k in ("noise", "scanline", "jpeg") else 0.01
+                res = 1.0 if k in ("noise", "scanline", "jpeg", "gap_count") or "crop" in k else 0.01
                 self.dev_labels[k].set(f"{v:.2f}{unit}" if res < 1.0 else f"{int(v)}{unit}")
             self._slider_updating = False
         self._update_preview()
@@ -1027,7 +1030,7 @@ class App(tk.Tk):
             "tint": 0.15,
             "stain": 0.35,
             "rotate": 4.5,
-            "blur": 0.8,
+            "blur": 0.0,
             "noise": 12.0,
             "texture": 3.5,
             "scanline": 10.0,
@@ -1036,6 +1039,7 @@ class App(tk.Tk):
             "crop_bottom": 0.0,
             "crop_left": 0.0,
             "crop_right": 0.0,
+            "contrast": 0.80,
             "gap_prob": 0.90,
             "gap_count": 16.0,
             "scratch": 0.70,
