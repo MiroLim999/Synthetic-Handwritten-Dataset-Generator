@@ -45,11 +45,15 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          $font = Join-Path $env:WINDIR 'Fonts\arial.ttf'
-          if (-not (Test-Path -LiteralPath $font -PathType Leaf)) {
-            throw "Required Windows CI font was not found: $font"
+          $font = Get-ChildItem -Path "$env:WINDIR\Fonts" -Filter "*arial*.ttf" | Select-Object -First 1 -ExpandProperty FullName
+          if (-not $font) {
+            $font = Get-ChildItem -Path "$env:WINDIR\Fonts" -Filter "*.ttf" | Select-Object -First 1 -ExpandProperty FullName
           }
-          Copy-Item -LiteralPath $font -Destination 'resources\fonts\CiTestFont.ttf'
+          if (-not $font) {
+            throw "Required Windows CI font was not found in $env:WINDIR\Fonts"
+          }
+          New-Item -ItemType Directory -Force -Path 'resources\fonts'
+          Copy-Item -Path $font -Destination 'resources\fonts\CiTestFont.ttf' -Force
       - name: Compile Python sources
         run: python -m compileall -q config.py gui.py src tools tests
       - name: Run unit and integration tests
