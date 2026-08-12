@@ -128,10 +128,10 @@ class App(tk.Tk):
         # Leave enough room for the host's taskbar/window chrome, including on
         # small remote-desktop and accessibility-scaled displays.  The tabs use
         # scrollable content, so a compact initial window remains usable.
-        width = min(1040, max(480, screen_width - 80))
-        height = min(740, max(360, screen_height - 100))
+        width = min(1240, max(640, screen_width - 60))
+        height = min(820, max(480, screen_height - 60))
         self.geometry(f"{width}x{height}")
-        self.minsize(min(480, width), min(360, height))
+        self.minsize(640, 440)
         self.resizable(True, True)
         self.configure(bg=BG)
 
@@ -399,9 +399,9 @@ class App(tk.Tk):
         cols.pack(fill="both", expand=True, padx=8, pady=(4, 4))
 
         left_container = ttk.Frame(cols)
-        right = ttk.Frame(cols)
+        right_container = ttk.Frame(cols)
         cols.add(left_container, weight=5)
-        cols.add(right, weight=5)
+        cols.add(right_container, weight=5)
 
         # Left pane viewport (independent scrollable canvas for controls)
         viewport = tk.Canvas(
@@ -425,20 +425,30 @@ class App(tk.Tk):
             lambda event: viewport.itemconfigure(content_window, width=event.width),
         )
 
+        # Right pane viewport (independent scrollable canvas for preview & progress)
+        right_viewport = tk.Canvas(
+            right_container, bg=BG, highlightthickness=0, borderwidth=0
+        )
+        right_scrollbar = ttk.Scrollbar(
+            right_container, orient="vertical", command=right_viewport.yview
+        )
+        right_viewport.configure(yscrollcommand=right_scrollbar.set)
+        right_scrollbar.pack(side="right", fill="y")
+        right_viewport.pack(side="left", fill="both", expand=True)
+
+        right = ttk.Frame(right_viewport)
+        right_window = right_viewport.create_window((0, 0), window=right, anchor="nw")
+        right.bind(
+            "<Configure>",
+            lambda _event: right_viewport.configure(scrollregion=right_viewport.bbox("all")),
+        )
+        right_viewport.bind(
+            "<Configure>",
+            lambda event: right_viewport.itemconfigure(right_window, width=event.width),
+        )
+
         self._target_scroll_pos = 0.0
         self._smooth_scroll_timer = None
-
-        def _update_smooth_scroll():
-            current = viewport.yview()[0]
-            target = getattr(self, "_target_scroll_pos", current)
-            diff = target - current
-            if abs(diff) < 0.0001:
-                viewport.yview_moveto(target)
-                self._smooth_scroll_timer = None
-            else:
-                new_pos = current + diff * 0.14
-                viewport.yview_moveto(new_pos)
-                self._smooth_scroll_timer = self.after(16, _update_smooth_scroll)
 
         def _on_mousewheel(event):
             try:
@@ -447,18 +457,26 @@ class App(tk.Tk):
             except Exception:
                 pass
 
-            bbox = viewport.bbox("all")
+            target_vp = viewport
+            try:
+                w = self.winfo_containing(event.x_root, event.y_root)
+                if w and (str(right_container) in str(w) or w == right_container or w == right):
+                    target_vp = right_viewport
+            except Exception:
+                pass
+
+            bbox = target_vp.bbox("all")
             if not bbox:
                 return
             content_height = bbox[3] - bbox[1]
-            visible_height = viewport.winfo_height()
+            visible_height = target_vp.winfo_height()
             if content_height <= visible_height or visible_height <= 0:
                 return
 
             scrollable_height = content_height - visible_height
-            current_target = getattr(self, "_target_scroll_pos", viewport.yview()[0])
+            current_target = target_vp.yview()[0]
 
-            step_pixels = 18.0
+            step_pixels = 22.0
             if event.num == 4:
                 delta_px = -step_pixels
             elif event.num == 5:
@@ -472,10 +490,7 @@ class App(tk.Tk):
 
             delta_fraction = delta_px / scrollable_height
             new_target = max(0.0, min(1.0, current_target + delta_fraction))
-            self._target_scroll_pos = new_target
-
-            if getattr(self, "_smooth_scroll_timer", None) is None:
-                _update_smooth_scroll()
+            target_vp.yview_moveto(new_target)
 
         def _bind_mousewheel(_event=None):
             self.bind_all("<MouseWheel>", _on_mousewheel)
@@ -501,6 +516,7 @@ class App(tk.Tk):
                 _bind_tree_mousewheel(child)
 
         self.after(200, lambda: _bind_tree_mousewheel(left_container))
+        self.after(200, lambda: _bind_tree_mousewheel(right_container))
 
         # ================= LEFT: settings =================================
         # ---- Generation settings -----------------------------------------
