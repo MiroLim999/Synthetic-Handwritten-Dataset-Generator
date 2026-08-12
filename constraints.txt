@@ -11,5 +11,5 @@ tqdm==4.68.3
 
 Faker==37.5.3
 mypy==1.17.1
-pip-audit==2.9.0
+pip-audit==2.10.1
 ruff==0.12.11
