@@ -4,7 +4,7 @@ Central configuration for the dataset toolkit.
 Everything tunable lives here: paths, dataset sizes, image settings,
 augmentation strength, and how often each field type appears.
 
-Tuned for OLD Maasin City, Southern Leyte civil registry documents
+Tuned for historical document handwriting records
 (Birth / Death / Marriage), roughly mid-1900s.
 """
 

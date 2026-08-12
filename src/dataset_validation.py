@@ -412,7 +412,8 @@ def validate_dataset(
 
     with tempfile.TemporaryDirectory(prefix="dataset-validation-") as temporary:
         database_path = Path(temporary) / "validation.sqlite3"
-        with sqlite3.connect(database_path) as connection:
+        connection = sqlite3.connect(database_path)
+        try:
             _initialize_validation_index(connection)
 
             for record in _iter_manifest(manifest_path, report):
@@ -664,6 +665,8 @@ def validate_dataset(
                 },
                 "image_modes": modes,
             }
+        finally:
+            connection.close()
 
     if manifest_path.is_file():
         report.manifest_sha256 = sha256_file(manifest_path)

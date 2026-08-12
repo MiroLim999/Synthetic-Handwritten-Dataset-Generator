@@ -67,7 +67,9 @@ class GenerateSafetyTests(unittest.TestCase):
         report = mock.Mock()
         report.raise_for_errors.return_value = None
         with (mock.patch.object(generator, "validate_dataset", return_value=report),
-              mock.patch.object(generator, "_require_fresh_validation_artifacts")):
+              mock.patch.object(generator, "_require_fresh_validation_artifacts"),
+              mock.patch.object(generator, "_require_fresh_handoff_artifacts"),
+              mock.patch.object(generator, "_validate_zip_archive")):
             yield report
 
     def test_success_is_published_only_after_validation(self):

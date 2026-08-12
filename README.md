@@ -1,8 +1,8 @@
-# Civil Registry Handwriting Dataset Toolkit
+# Synthetic Handwriting Dataset Generator
 
 This project creates cropped synthetic handwriting images and reconciles
-consented mock-handwriting samples for TrOCR experiments on Philippine civil
-registry fields. It is a dataset-building tool; the Kaggle notebook under
+consented mock-handwriting samples for TrOCR experiments on document
+fields. It is a dataset-building tool; the Kaggle notebook under
 `kaggle-code/` performs model training.
 
 Synthetic output is an approximation, not evidence of authentic historical
@@ -225,7 +225,7 @@ consent that covers the intended training, evaluation, retention, and sharing.
 Confirm the lawful basis and institutional requirements that apply in your
 jurisdiction; this section is operational guidance, not legal advice.
 
-- Collect only mock responses needed for the task. Do not ingest official civil
+- Collect only mock responses needed for the task. Do not ingest official
   records or unrelated personal data without explicit authority.
 - Keep identity/consent records separate from images. Use random writer IDs and
   restrict the re-identification key to authorized custodians.

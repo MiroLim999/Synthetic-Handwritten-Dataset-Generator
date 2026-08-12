@@ -111,7 +111,7 @@ def _open_path_portably(path: Path, *, select_file: bool = False) -> None:
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("Civil Registry Dataset Generator")
+        self.title("Synthetic Dataset Generator")
         screen_width = self.winfo_screenwidth()
         screen_height = self.winfo_screenheight()
         # Leave enough room for the host's taskbar/window chrome, including on
@@ -337,7 +337,7 @@ class App(tk.Tk):
         # ---- Header -------------------------------------------------------
         hdr = ttk.Frame(self)
         hdr.pack(fill="x", padx=16, pady=(16, 4))
-        ttk.Label(hdr, text="Civil Registry", style="Title.TLabel").pack(anchor="w")
+        ttk.Label(hdr, text="Synthetic Generator", style="Title.TLabel").pack(anchor="w")
         ttk.Label(hdr, text="Synthetic Dataset Generator", style="Sub.TLabel").pack(anchor="w")
 
         # ---- Tabs ---------------------------------------------------------
@@ -405,7 +405,7 @@ class App(tk.Tk):
         self.seed_entry = ttk.Entry(srow, textvariable=self.seed_var, width=10)
         self.seed_entry.pack(side="left", padx=(0, 8))
         self._run_controls.append(self.seed_entry)
-        ttk.Label(srow, text="same seed = same run", style="CardHint.TLabel").pack(side="left")
+        ttk.Label(srow, text="blank = random seed", style="CardHint.TLabel").pack(side="left")
 
         qp = ttk.Frame(card1, style="Card.TFrame")
         qp.pack(fill="x", pady=(0, 8))
@@ -1094,11 +1094,15 @@ class App(tk.Tk):
                 icon="warning",
             ):
                 return
-        try:
-            seed = int(self.seed_var.get().strip())
-        except ValueError:
-            messagebox.showerror("Invalid input", "Seed must be a whole number.")
-            return
+        raw_seed = self.seed_var.get().strip()
+        if not raw_seed:
+            seed = random.randint(1, 2_147_483_647)
+        else:
+            try:
+                seed = int(raw_seed)
+            except ValueError:
+                messagebox.showerror("Invalid input", "Seed must be a whole number.")
+                return
 
         # Snapshot every Tk-backed option on the UI thread. The worker receives
         # plain Python values and never calls Tk while it is running.

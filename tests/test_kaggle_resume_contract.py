@@ -6,7 +6,10 @@ import unittest
 from pathlib import Path
 
 import numpy as np
-import torch
+try:
+    import torch
+except ImportError:
+    torch = None
 
 
 NOTEBOOK = (
@@ -60,6 +63,7 @@ def _load_checkpoint_functions():
     return namespace
 
 
+@unittest.skipIf(torch is None, "PyTorch is not installed in local environment")
 class KaggleResumeContractTests(unittest.TestCase):
     def setUp(self):
         self.namespace = _load_checkpoint_functions()

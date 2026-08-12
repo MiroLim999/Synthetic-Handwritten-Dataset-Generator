@@ -41,9 +41,10 @@ def dataset_mutation_lock(dataset_dir: Path, *, purpose: str) -> Iterator[Path]:
     ).encode("utf-8") + b"\n"
     descriptor: int | None = None
     acquired = False
+    flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_BINARY", 0)
     try:
         try:
-            descriptor = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            descriptor = os.open(lock_path, flags)
         except FileExistsError as exc:
             raise RuntimeError(
                 f"Dataset is busy with another mutation: {lock_path}"
@@ -59,8 +60,16 @@ def dataset_mutation_lock(dataset_dir: Path, *, purpose: str) -> Iterator[Path]:
             os.close(descriptor)
         if acquired:
             try:
-                if lock_path.read_bytes() == payload:
-                    lock_path.unlink()
+                if lock_path.is_file() and lock_path.read_bytes() == payload:
+                    try:
+                        lock_path.unlink()
+                    except PermissionError:
+                        import time
+                        time.sleep(0.01)
+                        try:
+                            lock_path.unlink()
+                        except (FileNotFoundError, PermissionError):
+                            pass
             except FileNotFoundError:
                 pass
 

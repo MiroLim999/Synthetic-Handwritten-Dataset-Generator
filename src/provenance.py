@@ -54,7 +54,8 @@ def hash_dataset_images(dataset_dir: Path, split_names: Iterable[str]) -> str:
     digest = hashlib.sha256()
     with tempfile.TemporaryDirectory(prefix="dataset-image-hash-") as temporary:
         database_path = Path(temporary) / "files.sqlite3"
-        with sqlite3.connect(database_path) as connection:
+        connection = sqlite3.connect(database_path)
+        try:
             connection.execute("PRAGMA journal_mode=OFF")
             connection.execute("PRAGMA synchronous=OFF")
             connection.execute("PRAGMA temp_store=FILE")
@@ -87,6 +88,8 @@ def hash_dataset_images(dataset_dir: Path, split_names: Iterable[str]) -> str:
                 with Path(physical_path).open("rb") as handle:
                     while chunk := handle.read(1024 * 1024):
                         digest.update(chunk)
+        finally:
+            connection.close()
     return digest.hexdigest()
 
 

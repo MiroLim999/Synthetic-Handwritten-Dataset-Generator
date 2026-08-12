@@ -2,7 +2,7 @@
 One-off utility: expand the name lists to ~1000 unique entries each.
 
 Harvests authentic names from the Faker library using Filipino (fil_PH) and
-Spanish (es_ES) locales -- the right mix for old Maasin civil registry records
+Spanish (es_ES) locales -- the right mix for historical handwriting records
 (Spanish-era given names + Filipino/Visayan & Spanish surnames). The curated
 local surnames already in the repo are kept and prioritised.
 

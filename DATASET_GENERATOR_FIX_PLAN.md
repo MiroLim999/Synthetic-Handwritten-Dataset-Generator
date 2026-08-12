@@ -180,13 +180,13 @@ Required core columns:
 filename,label,split,source,field_type,font,sample_mode,writer_id
 ```
 
-- [ ] Define which columns are required and which may be empty.
-- [ ] Write synthetic rows with `source=synthetic` and an empty `writer_id`.
-- [ ] Write real rows with `source=real`, an explicit `writer_id`, and suitable
+- [x] Define which columns are required and which may be empty.
+- [x] Write synthetic rows with `source=synthetic` and an empty `writer_id`.
+- [x] Write real rows with `source=real`, an explicit `writer_id`, and suitable
       values for non-applicable synthetic fields.
-- [ ] Make the Kaggle notebook consume this unified manifest.
-- [ ] Stop relying on separate files whose contents disagree.
-- [ ] Add a manifest schema version.
+- [x] Make the Kaggle notebook consume this unified manifest.
+- [x] Stop relying on separate files whose contents disagree.
+- [x] Add a manifest schema version.
 
 Acceptance criteria:
 
@@ -198,14 +198,14 @@ Acceptance criteria:
 
 Affected file: `src/build_splits.py`
 
-- [ ] Require an explicit `writer_id` column instead of parsing filenames.
-- [ ] Preserve a stable writer-to-split assignment.
-- [ ] Reconcile or remove the prior real merge before rebuilding it.
-- [ ] Never append duplicate manifest or label rows.
-- [ ] Reject missing images, malformed writers, duplicate rows, and conflicting
+- [x] Require an explicit `writer_id` column instead of parsing filenames.
+- [x] Preserve a stable writer-to-split assignment.
+- [x] Reconcile or remove the prior real merge before rebuilding it.
+- [x] Never append duplicate manifest or label rows.
+- [x] Reject missing images, malformed writers, duplicate rows, and conflicting
       labels instead of silently skipping them.
-- [ ] Return structured merge results: copied, unchanged, skipped, and failed.
-- [ ] Keep the real test writers permanently held out.
+- [x] Return structured merge results: copied, unchanged, skipped, and failed.
+- [x] Keep the real test writers permanently held out.
 
 Acceptance criteria:
 
@@ -217,15 +217,15 @@ Acceptance criteria:
 
 Affected files: new validation module, generator, real merge, Kaggle notebook
 
-- [ ] Validate required manifest columns and schema version.
-- [ ] Validate allowed split and source values.
-- [ ] Require nonempty train, validation, and test splits when applicable.
-- [ ] Require exactly one existing readable image per manifest row.
-- [ ] Reject orphan images, duplicate paths, duplicate rows, and conflicts.
-- [ ] Validate image dimensions, modes, blankness, ink coverage, and extreme
+- [x] Validate required manifest columns and schema version.
+- [x] Validate allowed split and source values.
+- [x] Require nonempty train, validation, and test splits when applicable.
+- [x] Require exactly one existing readable image per manifest row.
+- [x] Reject orphan images, duplicate paths, duplicate rows, and conflicts.
+- [x] Validate image dimensions, modes, blankness, ink coverage, and extreme
       aspect ratios.
-- [ ] Produce a machine-readable validation report.
-- [ ] Run validation before ZIP creation and before Kaggle training.
+- [x] Produce a machine-readable validation report.
+- [x] Run validation before ZIP creation and before Kaggle training.
 
 Acceptance criteria:
 
@@ -236,15 +236,15 @@ Acceptance criteria:
 
 Affected files: `config.py`, `src/generate_synthetic.py`, `src/build_splits.py`
 
-- [ ] Validate positive sample counts and set a documented upper bound or
+- [x] Validate positive sample counts and set a documented upper bound or
       confirmation threshold.
-- [ ] Validate split fractions are finite, between zero and one, and sum to one.
-- [ ] Use `SYNTH_TEST_FRAC` and `REAL_TEST_FRAC`, or remove them from config.
-- [ ] Handle rounding and tiny sample/writer counts explicitly.
-- [ ] Validate field weights are recognized, nonnegative, and not all zero.
-- [ ] Validate every probability and numeric range.
-- [ ] Validate name pool, resources, font style/group, and specific font.
-- [ ] Fail on unknown selections instead of silently falling back.
+- [x] Validate split fractions are finite, between zero and one, and sum to one.
+- [x] Use `SYNTH_TEST_FRAC` and `REAL_TEST_FRAC`, or remove them from config.
+- [x] Handle rounding and tiny sample/writer counts explicitly.
+- [x] Validate field weights are recognized, nonnegative, and not all zero.
+- [x] Validate every probability and numeric range.
+- [x] Validate name pool, resources, font style/group, and specific font.
+- [x] Fail on unknown selections instead of silently falling back.
 
 Acceptance criteria:
 
@@ -256,14 +256,14 @@ Acceptance criteria:
 Affected files: `src/generate_synthetic.py`, `src/augment.py`, `src/fields.py`,
 `src/render.py`
 
-- [ ] Seed Python and NumPy from the same recorded run seed.
-- [ ] Use explicit run-local RNG objects rather than global state.
-- [ ] Stop mutating global name-pool configuration.
-- [ ] Define whether automatic runs use a random seed or a user-visible fixed
+- [x] Seed Python and NumPy from the same recorded run seed.
+- [x] Use explicit run-local RNG objects rather than global state.
+- [x] Stop mutating global name-pool configuration.
+- [x] Define whether automatic runs use a random seed or a user-visible fixed
       seed.
-- [ ] Add a GUI seed option and show the effective seed after generation.
-- [ ] Test that identical inputs and seeds produce identical outputs.
-- [ ] Test that different automatic seeds do not duplicate whole manifests.
+- [x] Add a GUI seed option and show the effective seed after generation.
+- [x] Test that identical inputs and seeds produce identical outputs.
+- [x] Test that different automatic seeds do not duplicate whole manifests.
 
 Acceptance criteria:
 
@@ -275,13 +275,13 @@ Acceptance criteria:
 
 Affected file: `src/generate_synthetic.py`
 
-- [ ] Write a run-level metadata JSON containing the seed, generator revision,
+- [x] Write a run-level metadata JSON containing the seed, generator revision,
       schema version, configuration snapshot, name pool, font selection,
       augmentation settings, resource hashes, dependency versions, timestamps,
       and image/row counts.
-- [ ] Record the effective selection rather than only requested values.
-- [ ] Record whether and when real data were merged.
-- [ ] Include a deterministic manifest hash and optional image-set hash.
+- [x] Record the effective selection rather than only requested values.
+- [x] Record whether and when real data were merged.
+- [x] Include a deterministic manifest hash and optional image-set hash.
 
 Acceptance criteria:
 
@@ -292,12 +292,12 @@ Acceptance criteria:
 Affected files: generator validation and
 `kaggle-code/trocr-finetuning-code.ipynb`
 
-- [ ] Define a canonical aspect-preserving resize-and-pad transform for TrOCR.
-- [ ] Apply the same transform during training, validation, testing, and
+- [x] Define a canonical aspect-preserving resize-and-pad transform for TrOCR.
+- [x] Apply the same transform during training, validation, testing, and
       inference.
-- [ ] Decide whether to cap or flag extreme generated widths.
-- [ ] Save padding/background parameters in model provenance.
-- [ ] Add visual tests for short, normal, and very long labels.
+- [x] Decide whether to cap or flag extreme generated widths.
+- [x] Save padding/background parameters in model provenance.
+- [x] Add visual tests for short, normal, and very long labels.
 
 Acceptance criteria:
 
@@ -308,12 +308,12 @@ Acceptance criteria:
 
 Affected files: `src/augment.py`, generator validation
 
-- [ ] Detect blank and nearly blank images.
-- [ ] Detect clipped ink and insufficient padding.
-- [ ] Measure minimum contrast and ink coverage.
-- [ ] Reject or regenerate semi-broken samples that no longer support the clean
+- [x] Detect blank and nearly blank images.
+- [x] Detect clipped ink and insufficient padding.
+- [x] Measure minimum contrast and ink coverage.
+- [x] Reject or regenerate semi-broken samples that no longer support the clean
       label.
-- [ ] Create a review montage stratified by field, font, and damage profile.
+- [x] Create a review montage stratified by field, font, and damage profile.
 
 Acceptance criteria:
 
@@ -324,14 +324,14 @@ Acceptance criteria:
 
 Affected files: generator split logic, manifest schema, Kaggle notebook
 
-- [ ] Label synthetic metrics explicitly as synthetic in-distribution metrics.
-- [ ] Hold out complete fonts for at least one evaluation split.
-- [ ] Hold out selected names, places, vocabulary, or formatting patterns.
-- [ ] Hold out selected degradation profiles or strength ranges.
-- [ ] Maintain a writer-held-out real test set.
-- [ ] Report metrics by source, field type, seen/unseen label, and held-out
+- [x] Label synthetic metrics explicitly as synthetic in-distribution metrics.
+- [x] Hold out complete fonts for at least one evaluation split.
+- [x] Hold out selected names, places, vocabulary, or formatting patterns.
+- [x] Hold out selected degradation profiles or strength ranges.
+- [x] Maintain a writer-held-out real test set.
+- [x] Report metrics by source, field type, seen/unseen label, and held-out
       condition.
-- [ ] Prevent real test writers from entering training after later merges.
+- [x] Prevent real test writers from entering training after later merges.
 
 Acceptance criteria:
 
@@ -343,15 +343,15 @@ Acceptance criteria:
 
 Affected file: `src/fields.py`
 
-- [ ] Generate calendar-valid dates including the 29th, 30th, 31st, and leap
+- [x] Generate calendar-valid dates including the 29th, 30th, 31st, and leap
       days.
-- [ ] Correct wording for the year 2000 and test year boundaries.
-- [ ] Add newborn and centenarian formats where supported by the real domain.
-- [ ] Review uniform age/year distributions against actual registry data.
-- [ ] Add representative abbreviations, punctuation, initials, casing, and
+- [x] Correct wording for the year 2000 and test year boundaries.
+- [x] Add newborn and centenarian formats where supported by the real domain.
+- [x] Review uniform age/year distributions against actual registry data.
+- [x] Add representative abbreviations, punctuation, initials, casing, and
       historical formats.
-- [ ] Review name suffix and middle-name probabilities.
-- [ ] Remove duplicated resource entries.
+- [x] Review name suffix and middle-name probabilities.
+- [x] Remove duplicated resource entries.
 
 Acceptance criteria:
 
@@ -360,12 +360,12 @@ Acceptance criteria:
 
 ### P1 verification gate
 
-- [ ] Unified-manifest integration test passes for synthetic plus real data.
-- [ ] Repeated real merge is idempotent.
-- [ ] Same-seed output hashes match exactly.
-- [ ] Dataset-integrity validator passes on a clean generated dataset.
-- [ ] Aspect-preserving preprocessing visual tests pass.
-- [ ] Evaluation report separates synthetic and real/held-out results.
+- [x] Unified-manifest integration test passes for synthetic plus real data.
+- [x] Repeated real merge is idempotent.
+- [x] Same-seed output hashes match exactly.
+- [x] Dataset-integrity validator passes on a clean generated dataset.
+- [x] Aspect-preserving preprocessing visual tests pass.
+- [x] Evaluation report separates synthetic and real/held-out results.
 
 ---
 
@@ -373,94 +373,94 @@ Acceptance criteria:
 
 ## P2.1 Improve synthetic writer realism
 
-- [ ] Add writer-consistent variations in baseline, spacing, slant, stroke
+- [x] Add writer-consistent variations in baseline, spacing, slant, stroke
       width, pressure, glyph form, and character connections.
-- [ ] Model relevant form lines, paper texture, neighboring marks, compression,
+- [x] Model relevant form lines, paper texture, neighboring marks, compression,
       and scan artifacts.
-- [ ] Calibrate augmentation probabilities and severity against real scans.
-- [ ] Version augmentation profiles.
-- [ ] Compare generated and real image statistics.
+- [x] Calibrate augmentation probabilities and severity against real scans.
+- [x] Version augmentation profiles.
+- [x] Compare generated and real image statistics.
 
 ## P2.2 Improve generator performance and resilience
 
 Affected files: `src/generate_synthetic.py`, `src/render.py`
 
-- [ ] Stream manifest output or checkpoint it safely instead of retaining every
+- [x] Stream manifest output or checkpoint it safely instead of retaining every
       row in memory.
-- [ ] Avoid materializing all field and split assignments at once.
-- [ ] Cache fonts by path and size where beneficial.
-- [ ] Estimate disk, memory, and archive size before starting.
-- [ ] Warn or require confirmation for very large jobs.
-- [ ] Check available disk space.
-- [ ] Support safe cancellation at sample and packaging boundaries.
-- [ ] Verify archives and write checksums.
+- [x] Avoid materializing all field and split assignments at once.
+- [x] Cache fonts by path and size where beneficial.
+- [x] Estimate disk, memory, and archive size before starting.
+- [x] Warn or require confirmation for very large jobs.
+- [x] Check available disk space.
+- [x] Support safe cancellation at sample and packaging boundaries.
+- [x] Verify archives and write checksums.
 
 ## P2.3 Harden GUI threading and reporting
 
 Affected file: `gui.py`
 
-- [ ] Snapshot every run option on the UI thread.
-- [ ] Never access Tk variables or call Tk methods from worker threads.
-- [ ] Route all background results through the UI queue.
-- [ ] Report real merge copied/skipped/error counts.
-- [ ] Treat a no-op merge as an explicit warning.
-- [ ] Save full tracebacks to a persistent log.
-- [ ] Limit dataset-size scans to one active refresh generation.
-- [ ] Handle files disappearing during refresh.
-- [ ] Move large deletion work off the UI thread and display progress.
-- [ ] Use `config.DEFAULT_COUNT` rather than a duplicated literal.
-- [ ] Make the window responsive to scaling and smaller displays.
-- [ ] Handle folder-opening failures and non-Windows platforms.
+- [x] Snapshot every run option on the UI thread.
+- [x] Never access Tk variables or call Tk methods from worker threads.
+- [x] Route all background results through the UI queue.
+- [x] Report real merge copied/skipped/error counts.
+- [x] Treat a no-op merge as an explicit warning.
+- [x] Save full tracebacks to a persistent log.
+- [x] Limit dataset-size scans to one active refresh generation.
+- [x] Handle files disappearing during refresh.
+- [x] Move large deletion work off the UI thread and display progress.
+- [x] Use `config.DEFAULT_COUNT` rather than a duplicated literal.
+- [x] Make the window responsive to scaling and smaller displays.
+- [x] Handle folder-opening failures and non-Windows platforms.
 
 ## P2.4 Make Kaggle training reproducible and resumable
 
 Affected file: `kaggle-code/trocr-finetuning-code.ipynb`
 
-- [ ] Require explicit `DATA_ROOT` when multiple manifests are present.
-- [ ] Run full dataset validation before loading the model.
-- [ ] Seed Python, NumPy, Torch, CUDA, and DataLoader workers.
-- [ ] Save model, processor, optimizer, scheduler, scaler, epoch, best metric,
+- [x] Require explicit `DATA_ROOT` when multiple manifests are present.
+- [x] Run full dataset validation before loading the model.
+- [x] Seed Python, NumPy, Torch, CUDA, and DataLoader workers.
+- [x] Save model, processor, optimizer, scheduler, scaler, epoch, best metric,
       configuration, and RNG states.
-- [ ] Resume only when checkpoint provenance matches the current dataset and
+- [x] Resume only when checkpoint provenance matches the current dataset and
       configuration.
-- [ ] Use a unique or clean output directory for each run.
-- [ ] Process the last partial gradient-accumulation group.
-- [ ] Use ceiling division for optimizer/scheduler step counts.
-- [ ] Remove `drop_last=True` unless deliberately required.
-- [ ] Assert CUDA availability when CUDA AMP is required.
-- [ ] Reconsider `DataParallel`; document or replace it with a more robust
+- [x] Use a unique or clean output directory for each run.
+- [x] Process the last partial gradient-accumulation group.
+- [x] Use ceiling division for optimizer/scheduler step counts.
+- [x] Remove `drop_last=True` unless deliberately required.
+- [x] Assert CUDA availability when CUDA AMP is required.
+- [x] Reconsider `DataParallel`; document or replace it with a more robust
       distributed approach.
-- [ ] Select a safe evaluation batch size dynamically.
-- [ ] Assert equal prediction/reference counts and nonempty splits.
-- [ ] Audit token lengths before training and reject silent truncation.
-- [ ] Use consistent generation length semantics.
-- [ ] Load both the saved processor and saved model for final evaluation.
-- [ ] Use validation—not test—for baseline/model-development comparisons.
-- [ ] Pin or record Torch, Transformers, Pillow, CUDA, and model revisions.
-- [ ] Stop globally suppressing all warnings.
-- [ ] Resolve the recorded DataLoader worker teardown warnings.
+- [x] Select a safe evaluation batch size dynamically.
+- [x] Assert equal prediction/reference counts and nonempty splits.
+- [x] Audit token lengths before training and reject silent truncation.
+- [x] Use consistent generation length semantics.
+- [x] Load both the saved processor and saved model for final evaluation.
+- [x] Use validation—not test—for baseline/model-development comparisons.
+- [x] Pin or record Torch, Transformers, Pillow, CUDA, and model revisions.
+- [x] Stop globally suppressing all warnings.
+- [x] Resolve the recorded DataLoader worker teardown warnings.
 
 ## P2.5 Strengthen model evaluation and artifact reporting
 
 Affected file: `kaggle-code/trocr-finetuning-code.ipynb`
 
-- [ ] Add per-field, per-source, seen/unseen, and held-out-domain metrics.
-- [ ] Touch the locked test set once after model choices are frozen.
-- [ ] Require `evaluation-report.json` before packaging.
-- [ ] Ensure the report cell runs before the ZIP cell.
-- [ ] Hash image content or the versioned dataset artifact, not only the
+- [x] Add per-field, per-source, seen/unseen, and held-out-domain metrics.
+- [x] Touch the locked test set once after model choices are frozen.
+- [x] Require `evaluation-report.json` before packaging.
+- [x] Ensure the report cell runs before the ZIP cell.
+- [x] Hash image content or the versioned dataset artifact, not only the
       manifest.
-- [ ] Include profile, hyperparameters, seeds, dependency versions, processor
+- [x] Include profile, hyperparameters, seeds, dependency versions, processor
       configuration, dataset version, and split definition in the report.
-- [ ] Assert that packaged weights match the evaluated weights.
+- [x] Assert that packaged weights match the evaluated weights.
 
 ### P2 verification gate
 
-- [ ] A Kaggle run can resume after a simulated interruption.
-- [ ] No training examples are discarded by batching or accumulation.
-- [ ] Repeated seeded runs yield reproducible metrics within the documented
+- [x] A Kaggle run can resume after a simulated interruption.
+- [x] No training examples are discarded by batching or accumulation.
+- [x] Repeated seeded runs yield reproducible metrics within the documented
       determinism guarantee.
-- [ ] The packaged ZIP contains the verified model, processor, configuration,
+- [x] The packaged ZIP contains the verified model, processor, configuration,
       and evaluation report.
 
 ---
@@ -469,54 +469,54 @@ Affected file: `kaggle-code/trocr-finetuning-code.ipynb`
 
 ## P3.1 Resolve fonts and licensing
 
-- [ ] Either distribute the advertised fonts legally or stop claiming they ship
+- [x] Either distribute the advertised fonts legally or stop claiming they ship
       with the repository.
-- [ ] Document font sources, licenses, installation, filenames, and checksums.
-- [ ] Make clean non-Windows installations fail with actionable instructions or
+- [x] Document font sources, licenses, installation, filenames, and checksums.
+- [x] Make clean non-Windows installations fail with actionable instructions or
       provide a portable licensed fallback.
-- [ ] Add required font/resource attribution and license files.
+- [x] Add required font/resource attribution and license files.
 
 ## P3.2 Repair packaging and dependencies
 
-- [ ] Declare the minimum supported Python version.
-- [ ] Add Faker to development/tool dependencies.
-- [ ] Remove OpenCV until scan processing exists, or restore the missing scan
+- [x] Declare the minimum supported Python version.
+- [x] Add Faker to development/tool dependencies.
+- [x] Remove OpenCV until scan processing exists, or restore the missing scan
       processor.
-- [ ] Add a pinned constraints or lock file.
-- [ ] Add dependency and security auditing.
-- [ ] Replace the hardcoded personal Conda launcher with portable environment
+- [x] Add a pinned constraints or lock file.
+- [x] Add dependency and security auditing.
+- [x] Replace the hardcoded personal Conda launcher with portable environment
       discovery and a documented fallback.
 
 ## P3.3 Correct documentation and privacy guidance
 
-- [ ] Restore or remove references to `src/make_sheets.py` and
+- [x] Restore or remove references to `src/make_sheets.py` and
       `src/process_scans.py`.
-- [ ] Correct outdated GUI theme and workflow descriptions.
-- [ ] Document the unified manifest schema and dataset validation process.
-- [ ] Document the difference between synthetic, held-out synthetic, and real
+- [x] Correct outdated GUI theme and workflow descriptions.
+- [x] Document the unified manifest schema and dataset validation process.
+- [x] Document the difference between synthetic, held-out synthetic, and real
       test metrics.
-- [ ] Document consent, access, retention, sharing, and deletion requirements
+- [x] Document consent, access, retention, sharing, and deletion requirements
       for real handwriting data.
-- [ ] Add a troubleshooting section for fonts, partial runs, Kaggle paths, and
+- [x] Add a troubleshooting section for fonts, partial runs, Kaggle paths, and
       checkpoint recovery.
 
 ## P3.4 Add automated quality controls
 
-- [ ] Add unit tests for path handling, field values, split calculation,
+- [x] Add unit tests for path handling, field values, split calculation,
       rendering, augmentation, RNG behavior, and manifest validation.
-- [ ] Add integration tests for generation, reruns, real merges, cancellation,
+- [x] Add integration tests for generation, reruns, real merges, cancellation,
       concurrent allocation, ZIP creation, and zip-only behavior.
-- [ ] Add malicious-path and guarded-delete tests.
-- [ ] Add same-seed reproducibility tests using image hashes.
-- [ ] Add dataset-integrity validation to CI.
-- [ ] Add formatting, linting, and type checking.
-- [ ] Add dependency vulnerability checks.
+- [x] Add malicious-path and guarded-delete tests.
+- [x] Add same-seed reproducibility tests using image hashes.
+- [x] Add dataset-integrity validation to CI.
+- [x] Add formatting, linting, and type checking.
+- [x] Add dependency vulnerability checks.
 
 ### P3 verification gate
 
-- [ ] A clean checkout can be installed and run using only documented steps.
-- [ ] All automated checks pass in CI.
-- [ ] Documentation matches the actual generator and Kaggle workflows.
+- [x] A clean checkout can be installed and run using only documented steps.
+- [x] All automated checks pass in CI.
+- [x] Documentation matches the actual generator and Kaggle workflows.
 
 ---
 
@@ -533,16 +533,16 @@ Affected file: `kaggle-code/trocr-finetuning-code.ipynb`
 
 # Definition of done for the project
 
-- [ ] No input can write, copy, archive, or delete outside the intended dataset
+- [x] No input can write, copy, archive, or delete outside the intended dataset
       directory.
-- [ ] Published runs are atomic, immutable by default, and internally valid.
-- [ ] Synthetic and real data use one versioned manifest.
-- [ ] Real writer isolation is explicit and tested.
-- [ ] Same-seed runs are reproducible across Python and NumPy operations.
-- [ ] TrOCR preprocessing preserves crop aspect ratios.
-- [ ] Reports distinguish synthetic in-distribution results from held-out and
+- [x] Published runs are atomic, immutable by default, and internally valid.
+- [x] Synthetic and real data use one versioned manifest.
+- [x] Real writer isolation is explicit and tested.
+- [x] Same-seed runs are reproducible across Python and NumPy operations.
+- [x] TrOCR preprocessing preserves crop aspect ratios.
+- [x] Reports distinguish synthetic in-distribution results from held-out and
       real-world results.
-- [ ] Kaggle training is resumable and its packaged report is bound to the exact
+- [x] Kaggle training is resumable and its packaged report is bound to the exact
       model and dataset artifact.
-- [ ] A clean checkout works using documented, licensed dependencies.
-- [ ] Unit, integration, integrity, and safety tests pass in CI.
+- [x] A clean checkout works using documented, licensed dependencies.
+- [x] Unit, integration, integrity, and safety tests pass in CI.

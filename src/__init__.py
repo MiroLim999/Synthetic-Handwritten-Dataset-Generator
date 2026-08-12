@@ -1,1 +1,1 @@
-"""Dataset-creation toolkit for civil registry handwriting recognition."""
+"""Dataset-creation toolkit for synthetic handwriting recognition."""
