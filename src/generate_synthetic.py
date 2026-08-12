@@ -615,18 +615,29 @@ def generate(count: int, dataset=None, seed: int = config.RANDOM_SEED,
             split_counts = config.allocate_synthetic_split_counts(count)
         field_weights = custom_field_weights if custom_field_weights is not None else _field_weights_for_mode(sample_mode)
         counters = GenerationCounters()
-        plan = iter_generation_plan(
+        plan_items = list(iter_generation_plan(
             count,
             field_weights,
             split_counts,
             rng,
             split_order=config.SPLIT_NAMES,
-        )
-        iterator = plan
+        ))
 
+        # Pre-assign writer IDs and seeds sequentially for 100% thread safety & test determinism
+        work_items = []
+        for item in plan_items:
+            i, field_type, split = item.index, item.field_type, item.split
+            file_name = f"syn_{i:06d}.png"
+            synthetic_writer_id = writer_assigner.writer_id_for(split)
+            style = writer_style_for(
+                synthetic_writer_id, seed, writer_profile
+            )
+            item_seed = (seed + i * 1_000_003) & 0x7FFFFFFF
+            work_items.append((item, file_name, synthetic_writer_id, style, item_seed))
+
+        progress = None
         if show_bar:
             progress = tqdm(
-                iterator,
                 total=count,
                 desc="Generating",
                 unit="img",
@@ -634,22 +645,11 @@ def generate(count: int, dataset=None, seed: int = config.RANDOM_SEED,
                 dynamic_ncols=True,
                 smoothing=0.1,
             )
-            iterator = progress
 
-        manifest_path = staging_dir / "manifest.csv"
-        labels_path = staging_dir / "labels.csv"
-        format_source_path = staging_dir / ".evaluation-source.csv"
-
-        def _process_one_item(item):
+        def _process_one_item(work_item):
             _raise_if_cancelled(cancel_event)
+            item, file_name, synthetic_writer_id, style, item_seed = work_item
             i, field_type, split = item.index, item.field_type, item.split
-            file_name = f"syn_{i:06d}.png"
-            synthetic_writer_id = writer_assigner.writer_id_for(split)
-            style = writer_style_for(
-                synthetic_writer_id, seed, writer_profile
-            )
-            # Create thread-local RNGs seeded deterministically per item index
-            item_seed = (seed + i * 1_000_003) & 0x7FFFFFFF
             item_rng = random.Random(item_seed)
             item_np_rng = np.random.default_rng(item_seed)
 
@@ -675,7 +675,10 @@ def generate(count: int, dataset=None, seed: int = config.RANDOM_SEED,
 
             return (i, file_name, label, split, field_type, font_used, format_profile, format_id)
 
-        workers = max(1, min(os.cpu_count() or 4, 16))
+        workers = 1 if count <= 20 else max(1, min(os.cpu_count() or 4, 16))
+        manifest_path = staging_dir / "manifest.csv"
+        labels_path = staging_dir / "labels.csv"
+        format_source_path = staging_dir / ".evaluation-source.csv"
         with (AtomicCsvWriter(manifest_path, MANIFEST_COLUMNS) as manifest_writer,
               AtomicCsvWriter(
                   labels_path, ("filename", "label", "split")) as labels_writer,
@@ -683,8 +686,7 @@ def generate(count: int, dataset=None, seed: int = config.RANDOM_SEED,
                   format_source_path, FORMAT_SOURCE_COLUMNS) as format_writer):
 
             with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
-                futures = {executor.submit(_process_one_item, item): item.index for item in iterator}
-                # Collect results as they complete
+                futures = {executor.submit(_process_one_item, w_item): w_item[0].index for w_item in work_items}
                 results = {}
                 done_count = 0
                 for future in concurrent.futures.as_completed(futures):
@@ -692,13 +694,16 @@ def generate(count: int, dataset=None, seed: int = config.RANDOM_SEED,
                     res = future.result()
                     results[res[0]] = res
                     done_count += 1
-                    if progress is not None and done_count % 50 == 0:
-                        progress.update(50)
-                        progress.set_postfix_str(f"{res[3]}/{res[4]}")
+                    if progress is not None:
+                        progress.update(1)
+                        if done_count % 50 == 0:
+                            progress.set_postfix_str(f"{res[3]}/{res[4]}")
                     if progress_callback is not None:
                         progress_callback(done_count, count, res[4])
 
-                # Write manifest in exact index order for 100% deterministic outputs
+                if progress is not None:
+                    progress.close()
+
                 for idx in sorted(results.keys()):
                     (i, file_name, label, split, field_type, font_used, format_profile, format_id) = results[idx]
                     manifest_writer.write({
