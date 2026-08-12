@@ -713,48 +713,90 @@ def generate(count: int, dataset=None, seed: int = config.RANDOM_SEED,
             worker_fn = _process_one_worker_task if workers > 1 else _process_one_item
             work_list = task_items if workers > 1 else work_items
 
-            with executor_cls(max_workers=workers) as executor:
-                futures = {executor.submit(worker_fn, w_item): (w_item[0] if workers > 1 else w_item[0].index) for w_item in work_list}
+            executor = executor_cls(max_workers=workers)
+            try:
                 results = {}
                 done_count = 0
-                for future in concurrent.futures.as_completed(futures):
-                    _raise_if_cancelled(cancel_event)
-                    res = future.result()
-                    results[res[0]] = res
-                    done_count += 1
-                    if progress is not None:
-                        progress.update(1)
-                        if done_count % 50 == 0:
-                            progress.set_postfix_str(f"{res[3]}/{res[4]}")
-                    if progress_callback is not None:
-                        progress_callback(done_count, count, res[4])
+                max_queue_size = workers * 4
+                work_iter = iter(work_list)
+                pending_futures = {}
 
-                if progress is not None:
-                    progress.close()
+                for _ in range(max_queue_size):
+                    try:
+                        w_item = next(work_iter)
+                        item_id = w_item[0] if workers > 1 else w_item[0].index
+                        fut = executor.submit(worker_fn, w_item)
+                        pending_futures[fut] = item_id
+                    except StopIteration:
+                        break
 
-                for idx in sorted(results.keys()):
-                    (i, file_name, label, split, field_type, font_used, format_profile, format_id) = results[idx]
-                    manifest_writer.write({
-                        "filename": file_name,
-                        "label": label,
-                        "split": split,
-                        "source": "synthetic",
-                        "field_type": field_type,
-                        "font": font_used,
-                        "sample_mode": sample_mode,
-                        "writer_id": "",
-                        "schema_version": MANIFEST_SCHEMA_VERSION,
-                    })
-                    labels_writer.write({
-                        "filename": file_name, "label": label, "split": split,
-                    })
-                    format_writer.write({
-                        "filename": file_name,
-                        "field_type": field_type,
-                        "format_profile": format_profile,
-                        "format_id": format_id,
-                    })
-                    counters.observe(split=split, field_type=field_type)
+                while pending_futures:
+                    if cancel_event is not None and cancel_event.is_set():
+                        executor.shutdown(wait=False, cancel_futures=True)
+                        _raise_if_cancelled(cancel_event)
+
+                    done, _ = concurrent.futures.wait(
+                        list(pending_futures.keys()),
+                        return_when=concurrent.futures.FIRST_COMPLETED
+                    )
+
+                    for fut in done:
+                        if cancel_event is not None and cancel_event.is_set():
+                            executor.shutdown(wait=False, cancel_futures=True)
+                            _raise_if_cancelled(cancel_event)
+                        pending_futures.pop(fut, None)
+                        try:
+                            res = fut.result()
+                            results[res[0]] = res
+                        except concurrent.futures.CancelledError:
+                            continue
+                        done_count += 1
+                        if progress is not None:
+                            progress.update(1)
+                            if done_count % 50 == 0:
+                                progress.set_postfix_str(f"{res[3]}/{res[4]}")
+                        if progress_callback is not None:
+                            progress_callback(done_count, count, res[4])
+
+                        try:
+                            w_item = next(work_iter)
+                            next_id = w_item[0] if workers > 1 else w_item[0].index
+                            next_fut = executor.submit(worker_fn, w_item)
+                            pending_futures[next_fut] = next_id
+                        except StopIteration:
+                            pass
+            except Exception:
+                executor.shutdown(wait=False, cancel_futures=True)
+                raise
+            else:
+                executor.shutdown(wait=True)
+
+            if progress is not None:
+                progress.close()
+
+            for idx in sorted(results.keys()):
+                (i, file_name, label, split, field_type, font_used, format_profile, format_id) = results[idx]
+                manifest_writer.write({
+                    "filename": file_name,
+                    "label": label,
+                    "split": split,
+                    "source": "synthetic",
+                    "field_type": field_type,
+                    "font": font_used,
+                    "sample_mode": sample_mode,
+                    "writer_id": "",
+                    "schema_version": MANIFEST_SCHEMA_VERSION,
+                })
+                labels_writer.write({
+                    "filename": file_name, "label": label, "split": split,
+                })
+                format_writer.write({
+                    "filename": file_name,
+                    "field_type": field_type,
+                    "format_profile": format_profile,
+                    "format_id": format_id,
+                })
+                counters.observe(split=split, field_type=field_type)
 
         _raise_if_cancelled(cancel_event)
         _write_evaluation_annotations_streaming(
