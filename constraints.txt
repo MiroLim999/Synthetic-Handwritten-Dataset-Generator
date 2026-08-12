@@ -5,7 +5,7 @@
 # development tools are intentionally not hash-locked. Refresh these pins in a
 # reviewed dependency-update change and run pip-audit plus the full test matrix.
 numpy==1.26.4 ; python_version < "3.13"
-numpy==2.4.4 ; python_version >= "3.13"
+numpy==2.5.1 ; python_version >= "3.13"
 pillow==12.3.0
 tqdm==4.68.3
 

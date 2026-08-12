@@ -4,5 +4,5 @@
 -c constraints.txt
 
 pillow>=10.0,<13
-numpy>=1.24,<3
+numpy>=2.5.1,<3
 tqdm>=4.65,<5
