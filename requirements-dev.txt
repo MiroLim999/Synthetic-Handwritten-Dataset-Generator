@@ -3,7 +3,7 @@
 -r requirements.txt
 
 # Used only by tools/expand_names.py; not required for dataset generation.
-Faker>=37,<41
+Faker>=40.36.0,<41
 
 mypy>=1.17,<3
 pip-audit>=2.9,<3

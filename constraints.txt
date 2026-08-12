@@ -9,7 +9,7 @@ numpy==2.4.4 ; python_version >= "3.13"
 pillow==12.3.0
 tqdm==4.68.3
 
-Faker==37.5.3
+Faker==40.36.0
 mypy==1.17.1
 pip-audit==2.9.0
 ruff==0.12.11
