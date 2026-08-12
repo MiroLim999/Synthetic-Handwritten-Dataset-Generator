@@ -336,6 +336,48 @@ class App(tk.Tk):
         ttk.Label(parent, text=text.upper(), style="Section.TLabel").pack(
             anchor="w", padx=16, pady=(12, 2))
 
+    def _collapsible_section(self, parent, text, default_open=True):
+        hdr_row = ttk.Frame(parent)
+        hdr_row.pack(fill="x", padx=16, pady=(12, 2))
+
+        lbl = ttk.Label(hdr_row, text=text.upper(), style="Section.TLabel", cursor="hand2")
+        lbl.pack(side="left")
+
+        is_open = [default_open]
+        arrow_var = tk.StringVar(value="▼" if default_open else "▶")
+
+        toggle_btn = ttk.Button(
+            hdr_row,
+            textvariable=arrow_var,
+            width=3,
+            style="Quick.TButton",
+            cursor="hand2"
+        )
+        toggle_btn.pack(side="left", padx=(8, 0))
+
+        outer = ttk.Frame(parent)
+        if default_open:
+            outer.pack(fill="x", padx=16, pady=(0, 4))
+
+        def _toggle(_event=None):
+            if is_open[0]:
+                outer.pack_forget()
+                is_open[0] = False
+                arrow_var.set("▶")
+            else:
+                outer.pack(fill="x", padx=16, pady=(0, 4))
+                is_open[0] = True
+                arrow_var.set("▼")
+            if hasattr(self, "_gen_viewport"):
+                self.after(50, lambda: self._gen_viewport.configure(scrollregion=self._gen_viewport.bbox("all")))
+
+        toggle_btn.config(command=_toggle)
+        lbl.bind("<Button-1>", _toggle)
+
+        card = ttk.Frame(outer, style="Card.TFrame", padding=12)
+        card.pack(fill="x")
+        return card, hdr_row
+
     # ------------------------------------------------------------------
     # UI layout
     # ------------------------------------------------------------------
@@ -472,8 +514,7 @@ class App(tk.Tk):
 
         # ================= LEFT: settings =================================
         # ---- Generation settings -----------------------------------------
-        self._section_label(left, "Generation")
-        card1 = self._card(left, pady=(0, 4))
+        card1, _gen_hdr = self._collapsible_section(left, "Generation", default_open=True)
 
         crow = ttk.Frame(card1, style="Card.TFrame")
         crow.pack(fill="x", pady=(0, 8))
@@ -524,8 +565,7 @@ class App(tk.Tk):
         self._run_controls.append(self.names_cb)
 
         # ---- Style settings ----------------------------------------------
-        self._section_label(left, "Style")
-        card2 = self._card(left, pady=(0, 4))
+        card2, _style_hdr = self._collapsible_section(left, "Style", default_open=True)
 
         mrow = ttk.Frame(card2, style="Card.TFrame")
         mrow.pack(fill="x", pady=(0, 8))
@@ -569,16 +609,12 @@ class App(tk.Tk):
         self._run_controls.append(self.edge_clipping_cb)
 
         # ---- Developer Studio (Custom Parameters) -----------------------
-        dev_hdr_row = ttk.Frame(left)
-        dev_hdr_row.pack(fill="x", pady=(8, 2))
-        ttk.Label(dev_hdr_row, text="DEVELOPER STUDIO (CUSTOM PARAMETERS)", style="Section.TLabel").pack(side="left")
+        card_dev, dev_hdr = self._collapsible_section(left, "Developer Studio (Custom Parameters)", default_open=True)
         self.reset_btn = ttk.Button(
-            dev_hdr_row, text="🔄 Reset Defaults", style="Secondary.TButton",
+            dev_hdr, text="🔄 Reset Defaults", style="Secondary.TButton",
             command=self._reset_developer_defaults)
         self.reset_btn.pack(side="right")
         self._run_controls.append(self.reset_btn)
-
-        card_dev = self._card(left, pady=(0, 4))
 
         self.dev_sliders = {}
         self.dev_labels = {}
@@ -679,8 +715,7 @@ class App(tk.Tk):
         self._run_controls.append(self.specific_cb)
 
         # ---- Options -----------------------------------------------------
-        self._section_label(left, "Options")
-        card3 = self._card(left, pady=(0, 4))
+        card3, _opts_hdr = self._collapsible_section(left, "Options", default_open=True)
         self.real_var = tk.BooleanVar(value=False)
         self.real_check = ttk.Checkbutton(
             card3, text="Merge real (mock) data afterwards",
