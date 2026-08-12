@@ -361,20 +361,30 @@ class App(tk.Tk):
 
     # ------------------------------------------------------------------
     def _build_generate_tab(self, parent):
-        # Keep every control reachable when the window is shortened on a small
-        # laptop display. Width follows the viewport; height can scroll.
+        # Two-column layout: Left pane scrolls controls & Developer Studio,
+        # Right pane stays fixed with Live Preview & Generation Progress.
+        cols = ttk.Panedwindow(parent, orient="horizontal")
+        cols.pack(fill="both", expand=True, padx=8, pady=(4, 4))
+
+        left_container = ttk.Frame(cols)
+        right = ttk.Frame(cols)
+        cols.add(left_container, weight=5)
+        cols.add(right, weight=5)
+
+        # Left pane viewport (independent scrollable canvas for controls)
         viewport = tk.Canvas(
-            parent, bg=BG, highlightthickness=0, borderwidth=0
+            left_container, bg=BG, highlightthickness=0, borderwidth=0
         )
         scrollbar = ttk.Scrollbar(
-            parent, orient="vertical", command=viewport.yview
+            left_container, orient="vertical", command=viewport.yview
         )
         viewport.configure(yscrollcommand=scrollbar.set)
         scrollbar.pack(side="right", fill="y")
         viewport.pack(side="left", fill="both", expand=True)
-        content = ttk.Frame(viewport)
-        content_window = viewport.create_window((0, 0), window=content, anchor="nw")
-        content.bind(
+
+        left = ttk.Frame(viewport)
+        content_window = viewport.create_window((0, 0), window=left, anchor="nw")
+        left.bind(
             "<Configure>",
             lambda _event: viewport.configure(scrollregion=viewport.bbox("all")),
         )
@@ -383,13 +393,82 @@ class App(tk.Tk):
             lambda event: viewport.itemconfigure(content_window, width=event.width),
         )
 
-        # Resizable two-column layout: both panes adapt on smaller displays.
-        cols = ttk.Panedwindow(content, orient="horizontal")
-        cols.pack(fill="both", expand=True, padx=8, pady=(4, 4))
-        left = ttk.Frame(cols)
-        right = ttk.Frame(cols)
-        cols.add(left, weight=5)
-        cols.add(right, weight=5)
+        self._target_scroll_pos = 0.0
+        self._smooth_scroll_timer = None
+
+        def _update_smooth_scroll():
+            current = viewport.yview()[0]
+            target = getattr(self, "_target_scroll_pos", current)
+            diff = target - current
+            if abs(diff) < 0.0001:
+                viewport.yview_moveto(target)
+                self._smooth_scroll_timer = None
+            else:
+                new_pos = current + diff * 0.14
+                viewport.yview_moveto(new_pos)
+                self._smooth_scroll_timer = self.after(16, _update_smooth_scroll)
+
+        def _on_mousewheel(event):
+            try:
+                if self.nb.index(self.nb.select()) != 0:
+                    return
+            except Exception:
+                pass
+
+            bbox = viewport.bbox("all")
+            if not bbox:
+                return
+            content_height = bbox[3] - bbox[1]
+            visible_height = viewport.winfo_height()
+            if content_height <= visible_height or visible_height <= 0:
+                return
+
+            scrollable_height = content_height - visible_height
+            current_target = getattr(self, "_target_scroll_pos", viewport.yview()[0])
+
+            step_pixels = 18.0
+            if event.num == 4:
+                delta_px = -step_pixels
+            elif event.num == 5:
+                delta_px = step_pixels
+            elif event.delta:
+                raw_notches = -(event.delta / 120.0)
+                clamped_notches = max(-2.5, min(2.5, raw_notches))
+                delta_px = clamped_notches * step_pixels
+            else:
+                return
+
+            delta_fraction = delta_px / scrollable_height
+            new_target = max(0.0, min(1.0, current_target + delta_fraction))
+            self._target_scroll_pos = new_target
+
+            if getattr(self, "_smooth_scroll_timer", None) is None:
+                _update_smooth_scroll()
+
+        def _bind_mousewheel(_event=None):
+            self.bind_all("<MouseWheel>", _on_mousewheel)
+            self.bind_all("<Button-4>", _on_mousewheel)
+            self.bind_all("<Button-5>", _on_mousewheel)
+
+        def _unbind_mousewheel(_event=None):
+            self.unbind_all("<MouseWheel>")
+            self.unbind_all("<Button-4>")
+            self.unbind_all("<Button-5>")
+
+        self._bind_gen_mousewheel = _bind_mousewheel
+        self._unbind_gen_mousewheel = _unbind_mousewheel
+        self._gen_viewport = viewport
+
+        _bind_mousewheel()
+
+        def _bind_tree_mousewheel(widget):
+            widget.bind("<MouseWheel>", _on_mousewheel, add="+")
+            widget.bind("<Button-4>", _on_mousewheel, add="+")
+            widget.bind("<Button-5>", _on_mousewheel, add="+")
+            for child in widget.winfo_children():
+                _bind_tree_mousewheel(child)
+
+        self.after(200, lambda: _bind_tree_mousewheel(left_container))
 
         # ================= LEFT: settings =================================
         # ---- Generation settings -----------------------------------------
@@ -458,6 +537,7 @@ class App(tk.Tk):
             mrow, textvariable=self.sample_mode_var, values=mode_labels,
             state="readonly", width=26)
         self.sample_mode_cb.pack(side="left")
+        self.sample_mode_cb.bind("<<ComboboxSelected>>", lambda e: self._update_preview())
         self._run_controls.append(self.sample_mode_cb)
 
         # Degradation Profile Dropdown
@@ -489,7 +569,15 @@ class App(tk.Tk):
         self._run_controls.append(self.edge_clipping_cb)
 
         # ---- Developer Studio (Custom Parameters) -----------------------
-        self._section_label(left, "Developer Studio (Custom Parameters)")
+        dev_hdr_row = ttk.Frame(left)
+        dev_hdr_row.pack(fill="x", pady=(8, 2))
+        ttk.Label(dev_hdr_row, text="DEVELOPER STUDIO (CUSTOM PARAMETERS)", style="Section.TLabel").pack(side="left")
+        self.reset_btn = ttk.Button(
+            dev_hdr_row, text="🔄 Reset Defaults", style="Secondary.TButton",
+            command=self._reset_developer_defaults)
+        self.reset_btn.pack(side="right")
+        self._run_controls.append(self.reset_btn)
+
         card_dev = self._card(left, pady=(0, 4))
 
         self.dev_sliders = {}
@@ -534,6 +622,21 @@ class App(tk.Tk):
         _make_slider(card_dev, "crop_bottom", "Bottom Cut %", 0.0, 15.0, 0.0, resolution=1.0, unit="%")
         _make_slider(card_dev, "crop_left", "Left Cut %", 0.0, 15.0, 0.0, resolution=1.0, unit="%")
         _make_slider(card_dev, "crop_right", "Right Cut %", 0.0, 15.0, 0.0, resolution=1.0, unit="%")
+
+        ttk.Separator(card_dev, orient="horizontal").pack(fill="x", pady=6)
+        ttk.Label(card_dev, text="Stroke Damage (Semi-Broken)", style="Sub.TLabel").pack(anchor="w", pady=(0, 4))
+
+        _make_slider(card_dev, "gap_prob", "Gap Prob", 0.00, 1.00, 0.90)
+        _make_slider(card_dev, "gap_count", "Gap Count", 0.0, 30.0, 16.0, resolution=1.0)
+        _make_slider(card_dev, "scratch", "Scratch Prob", 0.00, 1.00, 0.70)
+        _make_slider(card_dev, "erode", "Stroke Thin", 0.00, 1.00, 0.55)
+
+        ttk.Separator(card_dev, orient="horizontal").pack(fill="x", pady=6)
+        reset_bottom_btn = ttk.Button(
+            card_dev, text="🔄 Reset All Controls to Default", style="Secondary.TButton",
+            command=self._reset_developer_defaults)
+        reset_bottom_btn.pack(fill="x", pady=(2, 2))
+        self._run_controls.append(reset_bottom_btn)
 
         frow = ttk.Frame(card2, style="Card.TFrame")
         frow.pack(fill="x", pady=(0, 8))
@@ -681,7 +784,12 @@ class App(tk.Tk):
     # ------------------------------------------------------------------
     def _on_tab_change(self, _event=None):
         if self.nb.index(self.nb.select()) == 1:   # datasets tab
+            if hasattr(self, "_unbind_gen_mousewheel"):
+                self._unbind_gen_mousewheel()
             self._refresh_datasets()
+        else:
+            if hasattr(self, "_bind_gen_mousewheel"):
+                self._bind_gen_mousewheel()
 
     # ------------------------------------------------------------------
     # Font-style preview
@@ -771,17 +879,32 @@ class App(tk.Tk):
 
         profile = self._build_custom_developer_profile()
         crop_tuple = self._get_custom_crop_tuple()
+        semi_params = self._build_semi_broken_params()
+        sample_mode_key = self.mode_by_label.get(self.sample_mode_var.get(), "regular")
+        damage_prof = "semi_broken" if sample_mode_key.startswith("semi_broken") else "regular"
         try:
             img = degrade(
                 img,
+                damage_profile=damage_prof,
                 augmentation_profile=profile,
                 edge_clipping=crop_tuple,
+                semi_broken_params=semi_params,
                 rng=random.Random(42),
             )
         except Exception:
             pass
         self._preview_img = ImageTk.PhotoImage(img)
         self.preview_label.config(image=self._preview_img, text="")
+
+    def _build_semi_broken_params(self):
+        if not hasattr(self, "dev_sliders"):
+            return None
+        return {
+            "gap_prob": self.dev_sliders["gap_prob"].get(),
+            "gap_count": int(round(self.dev_sliders["gap_count"].get())),
+            "scratch_prob": self.dev_sliders["scratch"].get(),
+            "erode_prob": self.dev_sliders["erode"].get(),
+        }
 
     def _build_custom_developer_profile(self):
         if not hasattr(self, "dev_sliders"):
@@ -870,6 +993,52 @@ class App(tk.Tk):
         else:
             if "custom_dev_v1" in self.degradation_by_label.values():
                 self.degradation_var.set(config.DEGRADATION_PROFILES["custom_dev_v1"])
+        self._update_preview()
+
+    def _reset_developer_defaults(self):
+        """Reset all controls and sliders back to standard defaults."""
+        self._slider_updating = True
+
+        self.sample_mode_var.set(config.SAMPLE_MODES[config.DEFAULT_SAMPLE_MODE])
+        self.degradation_var.set(config.DEGRADATION_PROFILES[config.DEFAULT_DEGRADATION_PROFILE])
+        self.edge_clipping_var.set(config.EDGE_CLIPPING_OPTIONS[config.DEFAULT_EDGE_CLIPPING])
+        self.count_var.set(str(config.DEFAULT_COUNT))
+        self.seed_var.set(str(config.RANDOM_SEED))
+        if hasattr(self, "names_var") and hasattr(config, "NAMES_VERSION"):
+            self.names_var.set(config.NAMES_VERSION)
+        self.font_style_var.set("All fonts")
+        self._on_font_style_change()
+        self.real_var.set(False)
+        self.zip_var.set(False)
+
+        defaults = {
+            "fade": 0.65,
+            "tint": 0.15,
+            "stain": 0.35,
+            "rotate": 4.5,
+            "blur": 0.8,
+            "noise": 12.0,
+            "texture": 3.5,
+            "scanline": 10.0,
+            "jpeg": 75.0,
+            "crop_top": 0.0,
+            "crop_bottom": 0.0,
+            "crop_left": 0.0,
+            "crop_right": 0.0,
+            "gap_prob": 0.90,
+            "gap_count": 16.0,
+            "scratch": 0.70,
+            "erode": 0.55,
+        }
+
+        for name, def_val in defaults.items():
+            if hasattr(self, "dev_sliders") and name in self.dev_sliders:
+                self.dev_sliders[name].set(def_val)
+                unit = "°" if name == "rotate" else ("px" if name == "blur" else ("%" if "crop" in name else ""))
+                res = 1.0 if name in ("noise", "scanline", "jpeg", "gap_count") or "crop" in name else 0.01
+                self.dev_labels[name].set(f"{def_val:.2f}{unit}" if res < 1.0 else f"{int(def_val)}{unit}")
+
+        self._slider_updating = False
         self._update_preview()
 
     def _on_font_style_change(self, _event=None):
@@ -1297,6 +1466,7 @@ class App(tk.Tk):
         font_style, cursive_group, specific_font = self._current_font_selection()
         augmentation_profile = self._build_custom_developer_profile()
         edge_clipping = self._get_custom_crop_tuple()
+        semi_broken_params = self._build_semi_broken_params()
         merge_real = bool(self.real_var.get())
         package_zip = bool(self.zip_var.get())
 
@@ -1315,7 +1485,7 @@ class App(tk.Tk):
             args=(count, dataset, seed, names_version, sample_mode,
                   font_style, cursive_group, specific_font,
                   merge_real, package_zip, self.cancel_event,
-                  augmentation_profile, edge_clipping),
+                  augmentation_profile, edge_clipping, semi_broken_params),
             daemon=False)
         self.worker.start()
 
@@ -1326,7 +1496,8 @@ class App(tk.Tk):
              font_style, cursive_group, specific_font,
              merge_real, package_zip, cancel_event,
              augmentation_profile=config.DEFAULT_DEGRADATION_PROFILE,
-             edge_clipping=config.DEFAULT_EDGE_CLIPPING):
+             edge_clipping=config.DEFAULT_EDGE_CLIPPING,
+             semi_broken_params=None):
         try:
             def cb(done, total, field_type):
                 self.q.put(("progress", done, total, field_type))
@@ -1339,7 +1510,8 @@ class App(tk.Tk):
                                cancel_event=cancel_event,
                                archive_planned=package_zip,
                                augmentation_profile=augmentation_profile,
-                               edge_clipping=edge_clipping)
+                               edge_clipping=edge_clipping,
+                               semi_broken_params=semi_broken_params)
             if cancel_event.is_set():
                 self.q.put(("cancelled", "Generation cancelled safely."))
                 return

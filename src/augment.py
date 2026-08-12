@@ -163,7 +163,7 @@ def _ink_bbox(img: Image.Image) -> tuple[int, int, int, int]:
     )
 
 
-def _ink_gaps(img: Image.Image, rng=None) -> Image.Image:
+def _ink_gaps(img: Image.Image, rng=None, max_gap_count=None) -> Image.Image:
     """Erase tiny local pieces of strokes to mimic broken characters."""
     rng = _python_rng(rng)
     img = img.convert("RGB")
@@ -174,7 +174,9 @@ def _ink_gaps(img: Image.Image, rng=None) -> Image.Image:
         return img
 
     min_gap, max_gap = config.BROKEN_INK_GAP_SIZE
-    for _ in range(rng.randint(*config.BROKEN_INK_GAP_COUNT)):
+    gap_count_range = config.BROKEN_INK_GAP_COUNT if max_gap_count is None else (1, max(1, int(max_gap_count)))
+    count = rng.randint(*gap_count_range) if isinstance(gap_count_range, tuple) else gap_count_range
+    for _ in range(count):
         w = rng.randint(min_gap, max_gap)
         h = rng.randint(1, max(2, max_gap // 2))
         idx = rng.randrange(len(xs))
@@ -224,16 +226,23 @@ def _broken_contrast(img: Image.Image, rng=None) -> Image.Image:
     return ImageEnhance.Contrast(img).enhance(factor)
 
 
-def _semi_broken(img: Image.Image, rng=None) -> Image.Image:
+def _semi_broken(img: Image.Image, rng=None, params: dict | None = None) -> Image.Image:
     """Apply extra localized damage for semi-broken text samples."""
     rng = _python_rng(rng)
-    if rng.random() < config.BROKEN_CONTRAST_PROB:
+    params = params or {}
+    contrast_prob = params.get("contrast_prob", config.BROKEN_CONTRAST_PROB)
+    erode_prob = params.get("erode_prob", config.BROKEN_ERODE_PROB)
+    gap_prob = params.get("gap_prob", config.BROKEN_INK_GAP_PROB)
+    gap_count = params.get("gap_count", None)
+    scratch_prob = params.get("scratch_prob", config.BROKEN_SCRATCH_PROB)
+
+    if rng.random() < contrast_prob:
         img = _broken_contrast(img, rng=rng)
-    if rng.random() < config.BROKEN_ERODE_PROB:
+    if rng.random() < erode_prob:
         img = _erode_ink(img, rng=rng)
-    if rng.random() < config.BROKEN_INK_GAP_PROB:
-        img = _ink_gaps(img, rng=rng)
-    if rng.random() < config.BROKEN_SCRATCH_PROB:
+    if rng.random() < gap_prob:
+        img = _ink_gaps(img, rng=rng, max_gap_count=gap_count)
+    if rng.random() < scratch_prob:
         img = _scratches(img, rng=rng)
     return img
 
@@ -281,7 +290,8 @@ def _clip_edges(img: Image.Image, level: str | tuple[float, float, float, float]
 def degrade(img: Image.Image, damage_profile: str = "regular",
             rng=None, np_rng=None,
             augmentation_profile: str | AugmentationProfile | None = None,
-            edge_clipping: str = "none",
+            edge_clipping: str | tuple[float, float, float, float] = "none",
+            semi_broken_params: dict | None = None,
             ) -> Image.Image:
     """Apply the full random augmentation chain.
 
@@ -348,8 +358,8 @@ def degrade(img: Image.Image, damage_profile: str = "regular",
         )
     if rng.random() < stain_probability:
         img = _stains(img, rng=rng)
-    if damage_profile == "semi_broken":
-        img = _semi_broken(img, rng=rng)
+    if damage_profile.startswith("semi_broken") or semi_broken_params:
+        img = _semi_broken(img, rng=rng, params=semi_broken_params)
     if rng.random() < rotate_probability:
         img = _rotate(
             img,

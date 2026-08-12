@@ -265,7 +265,8 @@ def _generate_valid_sample(field_type: str, split: str, file_name: str,
                            augmentation_profile,
                            rng: random.Random,
                            np_rng: np.random.Generator,
-                           edge_clipping: str = "none"):
+                           edge_clipping: str = "none",
+                           semi_broken_params: dict | None = None):
     """Generate one quality-checked crop, retrying stochastic failures."""
     damage_profile = (
         "semi_broken" if sample_mode.startswith("semi_broken") else "regular"
@@ -297,6 +298,7 @@ def _generate_valid_sample(field_type: str, split: str, file_name: str,
             np_rng=np_rng,
             augmentation_profile=augmentation_profile,
             edge_clipping=edge_clipping,
+            semi_broken_params=semi_broken_params,
         )
         image = evaluation_policy.apply_degradation_holdout(
             image, split, sample_key=file_name
@@ -473,7 +475,8 @@ def generate(count: int, dataset=None, seed: int = config.RANDOM_SEED,
              writer_profile=DEFAULT_WRITER_PROFILE_ID,
              augmentation_profile=DEFAULT_AUGMENTATION_PROFILE_ID,
              samples_per_writer: int = 32,
-             edge_clipping: str = "none"):
+             edge_clipping: str | tuple[float, float, float, float] = "none",
+             semi_broken_params: dict | None = None):
     """
     Generate `count` synthetic samples into a numbered dataset folder.
 
@@ -627,6 +630,7 @@ def generate(count: int, dataset=None, seed: int = config.RANDOM_SEED,
                     rng,
                     np_rng,
                     edge_clipping=edge_clipping,
+                    semi_broken_params=semi_broken_params,
                 )
                 img.save(split_dirs[split] / file_name)
                 manifest_writer.write({

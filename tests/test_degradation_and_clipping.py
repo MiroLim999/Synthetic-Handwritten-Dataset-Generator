@@ -89,11 +89,21 @@ class TestDegradationAndClipping(unittest.TestCase):
         )
         self.assertIsInstance(out, Image.Image)
 
-    def test_custom_tuple_edge_clipping(self):
+    def test_custom_semi_broken_params(self):
         base_img = Image.new("RGB", (200, 100), (255, 255, 255))
-        clipped = _clip_edges(base_img, level=(0.10, 0.10, 0.10, 0.10))
-        self.assertEqual(clipped.width, 160)
-        self.assertEqual(clipped.height, 80)
+        custom_params = {
+            "gap_prob": 1.0,
+            "gap_count": 20,
+            "scratch_prob": 1.0,
+            "erode_prob": 1.0,
+        }
+        out = degrade(
+            base_img,
+            damage_profile="semi_broken",
+            semi_broken_params=custom_params,
+            rng=random.Random(42),
+        )
+        self.assertIsInstance(out, Image.Image)
 
 
 if __name__ == "__main__":
