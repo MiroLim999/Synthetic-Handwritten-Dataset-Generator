@@ -45,12 +45,15 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          $font = Get-ChildItem -Path "$env:WINDIR\Fonts" -Filter "*arial*.ttf" | Select-Object -First 1 -ExpandProperty FullName
+          $font = Get-ChildItem -Path "$env:WINDIR\Fonts" -Force -Filter "*arial*.ttf" -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty FullName
           if (-not $font) {
-            $font = Get-ChildItem -Path "$env:WINDIR\Fonts" -Filter "*.ttf" | Select-Object -First 1 -ExpandProperty FullName
+            $font = Get-ChildItem -Path "$env:WINDIR\Fonts" -Force -Filter "*.ttf" -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty FullName
           }
           if (-not $font) {
-            throw "Required Windows CI font was not found in $env:WINDIR\Fonts"
+            $font = Get-ChildItem -Path $env:WINDIR -Force -Recurse -Filter "*.ttf" -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty FullName
+          }
+          if (-not $font) {
+            throw "Required Windows CI font was not found in $env:WINDIR"
           }
           New-Item -ItemType Directory -Force -Path 'resources\fonts'
           Copy-Item -Path $font -Destination 'resources\fonts\CiTestFont.ttf' -Force
