@@ -57,10 +57,19 @@ jobs:
           }
           New-Item -ItemType Directory -Force -Path 'resources\fonts'
           Copy-Item -Path $font -Destination 'resources\fonts\CiTestFont.ttf' -Force
+      - name: Verify staged font
+        run: python -c "from pathlib import Path; d=Path('resources/fonts'); print('Fonts dir:', list(d.glob('*'))); fonts=[f for f in d.glob('*.ttf')]; print('TTF fonts:', fonts); assert len(fonts) >= 1, 'No .ttf fonts found'"
       - name: Compile Python sources
         run: python -m compileall -q config.py gui.py src tools tests
       - name: Run unit and integration tests
-        run: python -m unittest discover -s tests -v
+        run: python -m unittest discover -s tests -v 2>&1 | tee test-output.txt
+        shell: bash
+      - name: Upload test output on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-output-${{ matrix.os }}-py${{ matrix.python-version }}
+          path: test-output.txt
 
   quality-gates:
     name: lint, format, types, integrity, and dependencies
