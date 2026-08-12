@@ -1300,7 +1300,18 @@ class App(tk.Tk):
             )
             folder_mb = estimate.estimated_bytes / (1024 * 1024)
             zip_mb = estimate.estimated_archive_bytes / (1024 * 1024)
-            time_sec = max(1, round(count / 350))
+
+            # Dynamically estimate throughput based on active CPU threads count
+            active_threads = os.cpu_count() or 16
+            if hasattr(self, "workers_var"):
+                w_str = self.workers_var.get().strip()
+                if w_str and not w_str.startswith("Auto"):
+                    try:
+                        active_threads = int(w_str)
+                    except ValueError:
+                        pass
+            est_imgs_per_sec = max(30, min(600, active_threads * 22))
+            time_sec = max(1, round(count / est_imgs_per_sec))
 
             self.est_folder_lbl.config(text=f"~{folder_mb:.1f} MB ({estimate.estimated_image_count:,} imgs)")
             self.est_zip_lbl.config(text=f"~{zip_mb:.1f} MB" if create_zip else "Disabled")

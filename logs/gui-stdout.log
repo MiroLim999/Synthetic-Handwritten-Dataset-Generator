@@ -165,3 +165,11 @@ Generating 200,000 synthetic samples
   mode   : Regular mixed fields
   fonts  : 20 fonts  (style: cursive)
 
+Generating 40,000 synthetic samples
+  output : C:\Users\limmi\OneDrive\Desktop\synthetic-generator\dataset\datasets\dataset_023
+  splits : train, val, test
+  names  : name1
+  seed   : 42
+  mode   : Regular mixed fields
+  fonts  : 24 fonts  (style: all)
+
