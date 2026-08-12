@@ -345,6 +345,42 @@ def _generate_valid_sample(field_type: str, split: str, file_name: str,
     )
 
 
+def _process_one_worker_task(task_args):
+    (i, field_type, split, file_name, names_dir_str, sample_mode,
+     font_style, cursive_group, synthetic_writer_id, seed,
+     writer_profile, augmentation_profile, edge_clipping,
+     semi_broken_params, effective_fonts, out_file_str) = task_args
+
+    names_dir = Path(names_dir_str)
+    out_file = Path(out_file_str)
+    item_seed = (seed + i * 1_000_003) & 0x7FFFFFFF
+    item_rng = random.Random(item_seed)
+    item_np_rng = np.random.default_rng(item_seed)
+
+    evaluation_policy = build_synthetic_evaluation_policy(effective_fonts, seed)
+    style = writer_style_for(synthetic_writer_id, seed, writer_profile)
+
+    (label, img, font_used, format_profile,
+     format_id) = _generate_valid_sample(
+        field_type,
+        split,
+        file_name,
+        names_dir,
+        sample_mode,
+        font_style,
+        cursive_group,
+        evaluation_policy,
+        style,
+        augmentation_profile,
+        item_rng,
+        item_np_rng,
+        edge_clipping=edge_clipping,
+        semi_broken_params=semi_broken_params,
+    )
+    img.save(out_file)
+    return (i, file_name, label, split, field_type, font_used, format_profile, format_id)
+
+
 def _run_metadata(*, seed: int, count: int, sample_mode: str,
                   names_dir: Path, font_style: str, cursive_group: str,
                   specific_font: str, effective_fonts: tuple[str, ...],
@@ -623,7 +659,8 @@ def generate(count: int, dataset=None, seed: int = config.RANDOM_SEED,
             split_order=config.SPLIT_NAMES,
         ))
 
-        # Pre-assign writer IDs and seeds sequentially for 100% thread safety & test determinism
+        # Pre-assign writer IDs and seeds sequentially for 100% thread/process safety & test determinism
+        task_items = []
         work_items = []
         for item in plan_items:
             i, field_type, split = item.index, item.field_type, item.split
@@ -633,7 +670,14 @@ def generate(count: int, dataset=None, seed: int = config.RANDOM_SEED,
                 synthetic_writer_id, seed, writer_profile
             )
             item_seed = (seed + i * 1_000_003) & 0x7FFFFFFF
+            out_file = split_dirs[split] / file_name
             work_items.append((item, file_name, synthetic_writer_id, style, item_seed))
+            task_items.append((
+                i, field_type, split, file_name, str(names_dir), sample_mode,
+                font_style, cursive_group, synthetic_writer_id, seed,
+                writer_profile, augmentation_profile, edge_clipping,
+                semi_broken_params, effective_fonts, str(out_file)
+            ))
 
         progress = None
         if show_bar:
@@ -675,7 +719,7 @@ def generate(count: int, dataset=None, seed: int = config.RANDOM_SEED,
 
             return (i, file_name, label, split, field_type, font_used, format_profile, format_id)
 
-        workers = 1 if count <= 20 else max(1, min(os.cpu_count() or 4, 16))
+        workers = 1 if count <= 20 else max(1, min(os.cpu_count() or 4, 14))
         manifest_path = staging_dir / "manifest.csv"
         labels_path = staging_dir / "labels.csv"
         format_source_path = staging_dir / ".evaluation-source.csv"
@@ -685,8 +729,12 @@ def generate(count: int, dataset=None, seed: int = config.RANDOM_SEED,
               AtomicCsvWriter(
                   format_source_path, FORMAT_SOURCE_COLUMNS) as format_writer):
 
-            with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
-                futures = {executor.submit(_process_one_item, w_item): w_item[0].index for w_item in work_items}
+            executor_cls = concurrent.futures.ProcessPoolExecutor if workers > 1 else concurrent.futures.ThreadPoolExecutor
+            worker_fn = _process_one_worker_task if workers > 1 else _process_one_item
+            work_list = task_items if workers > 1 else work_items
+
+            with executor_cls(max_workers=workers) as executor:
+                futures = {executor.submit(worker_fn, w_item): (w_item[0] if workers > 1 else w_item[0].index) for w_item in work_list}
                 results = {}
                 done_count = 0
                 for future in concurrent.futures.as_completed(futures):
