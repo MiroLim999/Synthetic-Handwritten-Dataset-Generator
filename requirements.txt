@@ -1,5 +1,8 @@
-pillow>=10.0.0
-numpy>=1.24,<2
-tqdm>=4.65.0
-# used only by src/process_scans.py (scan alignment + cropping)
-opencv-python>=4.8.0
+# Runtime dependencies for Python >=3.10.
+# constraints.txt is the CI-tested version snapshot. It is intentionally not a
+# cryptographic lock file; see README.md for the update/audit policy.
+-c constraints.txt
+
+pillow>=10.0,<13
+numpy>=1.24,<3
+tqdm>=4.65,<5

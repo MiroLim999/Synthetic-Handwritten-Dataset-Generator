@@ -1,71 +1,118 @@
-# Training TrOCR on Google Colab (free T4 GPU)
+# Fine-tuning TrOCR on Kaggle
 
-This folder has `train_trocr_colab.ipynb` — a ready-to-run notebook that
-fine-tunes `microsoft/trocr-base-handwritten` on your generated dataset.
+`trocr-finetuning-code.ipynb` is the supported training notebook. It is written
+for a Kaggle CUDA GPU session and consumes one validated dataset produced by
+this repository. It is not a Google Colab/Drive notebook.
 
-## Step 1 — Zip your dataset
+## 1. Publish and attach the dataset
 
-On your PC, zip the **splits** folder (the one with `train/`, `val/`, `test/`,
-and `labels.csv`):
+Generate the dataset locally, inspect `review-montage.jpg`, and confirm that
+`dataset-validation.json` reports `"valid": true`. Upload the complete dataset
+folder as a private Kaggle Dataset unless its approved sharing policy permits
+broader access. Preserve all of these entries:
 
-- Right-click `dataset\splits` → **Send to → Compressed (zipped) folder**
-- You'll get `splits.zip`
+```text
+dataset_NNN/
+|-- train/
+|-- val/
+|-- test/
+|-- manifest.csv
+|-- labels.csv
+|-- dataset-validation.json
+|-- run-metadata.json
+|-- evaluation-annotations.csv
+|-- review-montage.jpg
+`-- image-statistics.json
+```
 
-> Tip: a 60k dataset is ~3–6 GB. If upload is slow, you can zip just
-> `dataset/synthetic` instead and adjust the paths in the notebook.
+`labels.csv` is only a compatibility view; the notebook reads the unified
+`manifest.csv`. If real handwriting is included, apply the consent, access,
+retention, sharing, and deletion rules in the main README before uploading it.
+If transferring the generator-created ZIP, keep its `.zip.sha256` sidecar and
+verify the checksum before publishing the extracted folder as a Kaggle Dataset.
 
-## Step 2 — Upload to Google Drive
+In the Kaggle notebook editor, use **Add Input** to attach the dataset. Enable a
+CUDA GPU accelerator. Internet access is needed if the pinned base-model
+revision is not already available in the session cache.
 
-Put `splits.zip` somewhere in your Google Drive, e.g. `MyDrive/splits.zip`.
+## 2. Set the explicit configuration
 
-## Step 3 — Open the notebook in Colab
+Run the environment/import cells, then edit the configuration cell:
 
-1. Go to https://colab.research.google.com
-2. **File → Upload notebook** → choose `train_trocr_colab.ipynb`
-3. **Runtime → Change runtime type → T4 GPU**
+```python
+DATA_ROOT = "/kaggle/input/<dataset-slug>/dataset_NNN"
+RUN_TAG = "experiment-001"
+PROFILE = "50k"
+```
 
-## Step 4 — Run the cells top to bottom
+`DATA_ROOT` must be the exact directory containing `manifest.csv`,
+`dataset-validation.json`, and `train/`, `val/`, `test/`. Leave no wildcard and
+do not point it at a parent containing several runs. When `DATA_ROOT` is blank,
+the notebook prints candidate manifest directories and stops instead of
+silently choosing one.
 
-- Cell 4 mounts your Drive.
-- Cell 4 (unzip): make sure `DATA_ZIP` matches where you put the zip.
-- Cell 5 (CONFIG): make sure `DATA_DIR` matches where it extracted
-  (usually `/content/data/splits`).
-- Then just run each cell. Stage 1 trains on the synthetic data and saves the
-  model to your Drive.
+Change `RUN_TAG` for a genuinely new experiment. The run fingerprint also binds
+the dataset hashes, model revision, preprocessing contract, seed,
+hyperparameters, and dependency versions; an incompatible directory is
+rejected rather than reused.
 
-## Step 5 — Later: real handwriting (Stage 2)
+## 3. Run validation and training
 
-When you've collected real samples, zip their `train/val/test` + `labels.csv`,
-upload, set `REAL_DIR` and `RUN_STAGE2 = True` in the Stage 2 cell, and run it.
-It continues from the Stage-1 model with a lower learning rate.
+Run cells in order. Before downloading a model, the notebook independently
+checks:
 
-## If the Colab session disconnects (free tier)
+- the exact version-1 unified-manifest schema;
+- safe, unique PNG filenames and readable images;
+- non-empty train/validation/test splits;
+- missing and orphan images;
+- synthetic/real row requirements;
+- disjoint real writers across splits; and
+- the manifest and image hashes recorded in `dataset-validation.json`.
 
-Checkpoints are saved to your Drive **every epoch** (in `..._stage1_ckpt`).
-To resume after a disconnect:
+One aspect-preserving 384 x 384 resize-and-pad transform is shared by training,
+evaluation, and inference. Validation—not test—drives early stopping and model
+selection. The locked test cell intentionally requires
+`MODEL_CHOICES_FROZEN = True` and should be executed once after all choices are
+final.
 
-1. Reconnect / open the notebook again, set runtime to **T4 GPU**.
-2. Re-run cells 1-9 (install, mount, unzip, config, model, datasets, trainer).
-3. Run the training cell (11). It detects the last checkpoint on Drive and
-   **continues from where it stopped** — you don't lose finished epochs.
+The final report separates:
 
-The "before" accuracy is also saved to Drive, so the before/after comparison
-still works after a resume.
+- `synthetic / in-distribution`;
+- `synthetic / held-out`; and
+- `real / writer-held-out`.
 
-## Before / after accuracy
+Treat the real writer-held-out result as the most relevant new-writer estimate.
+Synthetic scores are controlled diagnostic measurements, not evidence of
+real-world registry performance.
 
-- Cell 10 measures the **base model** accuracy (before fine-tuning).
-- Cell 13 measures it **after** Stage 1 and prints a before -> after table
-  (Character Error Rate and exact-match accuracy).
-- Stage 2 does the same on your **real** validation data.
+## 4. Preserve or resume a run
 
-## Notes
+Kaggle's `/kaggle/input` is read-only and `/kaggle/working` is temporary. The
+notebook writes its run contract, checkpoints, best model, evaluation report,
+and final archive beneath `/kaggle/working/trocr-runs/`. Before ending a session,
+save a Kaggle notebook version with outputs or download the completed archive.
 
-- **fp16 + batch size 8** fits comfortably on a T4 (16 GB). Lower `BATCH_SIZE`
-  if you ever see out-of-memory.
-- Validation uses generation (slow), so the notebook caps val at `VAL_SUBSET`
-  (1500) for speed. Increase if you want.
-- Your **real** test set is the honest accuracy measure. Synthetic accuracy
-  will look high — don't rely on it alone.
-- The trained model is saved to your Drive (`trocr_maasin_stage1`), so it
-  survives the Colab session ending.
+Resume only from a complete prior run directory with the same run key and
+`run-contract.json`. Restore that directory under
+`/kaggle/working/trocr-runs/` before training, keep `RESUME_IF_AVAILABLE = True`,
+and retain the same dataset, `RUN_TAG`, profile, seed, model revision, and
+dependency/runtime versions. A prior output can be attached as a Kaggle Dataset,
+but because attached inputs are read-only, copy the one exact run directory into
+the writable working location first. Do not merge checkpoint files from
+different run keys.
+
+Exact repeat/resume is targeted only for the same GPU architecture, CUDA,
+PyTorch, Transformers, and dependency versions recorded in the contract.
+Floating-point results may differ on another stack even with the same seed.
+
+## 5. Export the evaluated artifact
+
+After the one-shot locked test, run the report and packaging cells. Keep the
+model weights together with `evaluation-report.json`; the report records the
+weights hash and dataset hashes. An unreported checkpoint is not the evaluated
+artifact.
+
+If a path fails, print `DATA_ROOT`, `RUN_DIR`, and the manifest candidates, then
+verify spelling and nesting in Kaggle's Input panel. If a checkpoint is refused,
+compare the prior and current `run-contract.json`; use a new `RUN_TAG` when the
+configuration or dataset changed.

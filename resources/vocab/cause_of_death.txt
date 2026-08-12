@@ -36,7 +36,6 @@ Liver Disease
 Kidney Failure
 Pulmonary Edema
 Cerebrovascular Accident
-Cardiac Arrest
 Respiratory Failure
 Acute Bronchitis
 Intestinal Obstruction

@@ -1,0 +1,15 @@
+# Exact direct-dependency versions exercised by CI.
+#
+# NumPy 1.26 is retained on Python 3.10-3.12 for broad wheel compatibility;
+# Python 3.13+ needs the NumPy 2 wheel line. Transitive packages used only by
+# development tools are intentionally not hash-locked. Refresh these pins in a
+# reviewed dependency-update change and run pip-audit plus the full test matrix.
+numpy==1.26.4 ; python_version < "3.13"
+numpy==2.4.4 ; python_version >= "3.13"
+pillow==12.3.0
+tqdm==4.68.3
+
+Faker==37.5.3
+mypy==1.17.1
+pip-audit==2.9.0
+ruff==0.12.11

@@ -1,0 +1,10 @@
+# Optional development and repository-maintenance tools.
+-c constraints.txt
+-r requirements.txt
+
+# Used only by tools/expand_names.py; not required for dataset generation.
+Faker>=37,<41
+
+mypy>=1.17,<3
+pip-audit>=2.9,<3
+ruff>=0.12,<1

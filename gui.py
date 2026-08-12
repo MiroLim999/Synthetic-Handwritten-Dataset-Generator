@@ -9,24 +9,22 @@ import os
 import sys
 import time
 import queue
-import shutil
 import threading
 import subprocess
+import traceback
+import webbrowser
 import tkinter as tk
+from datetime import datetime
 from pathlib import Path
 from tkinter import ttk, messagebox
-
-if sys.stdout is None:
-    sys.stdout = open(os.devnull, "w")
-if sys.stderr is None:
-    sys.stderr = open(os.devnull, "w")
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from PIL import Image, ImageDraw, ImageFont, ImageTk
 
 import config
-from src.generate_synthetic import generate, zip_dataset
+from src.generate_synthetic import (GenerationCancelled, generate,
+                                    guarded_remove_dataset, zip_dataset)
 from src.build_splits import build
 from src.render import (CURSIVE_STYLE_GROUPS, fonts_for_style,
                         font_display_name, font_path_for)
@@ -49,28 +47,108 @@ PREVIEW_BG = "#fafbff"  # preview canvas background
 
 PREVIEW_WIDTH = 460
 SAMPLE_TEXT = "Juan Dela Cruz"
+LOG_DIR = config.ROOT / "logs"
+LOG_FILE = LOG_DIR / "gui.log"
+MAX_LOG_BYTES = 2 * 1024 * 1024
+LOG_BACKUPS = 3
+
+
+def _rotate_log(log_path: Path | None = None) -> None:
+    """Keep a few bounded log generations without relying on logging threads."""
+    log_path = LOG_FILE if log_path is None else Path(log_path)
+    try:
+        if not log_path.is_file() or log_path.stat().st_size < MAX_LOG_BYTES:
+            return
+        oldest = log_path.with_name(f"{log_path.name}.{LOG_BACKUPS}")
+        oldest.unlink(missing_ok=True)
+        for index in range(LOG_BACKUPS - 1, 0, -1):
+            source = log_path.with_name(f"{log_path.name}.{index}")
+            if source.exists():
+                source.replace(log_path.with_name(f"{log_path.name}.{index + 1}"))
+        log_path.replace(log_path.with_name(f"{log_path.name}.1"))
+    except OSError:
+        pass
+
+
+def _log_error(context: str, detail: str) -> Path:
+    """Persist a full error/traceback for GUI and pythonw launches."""
+    try:
+        LOG_DIR.mkdir(parents=True, exist_ok=True)
+        _rotate_log()
+        timestamp = datetime.now().astimezone().isoformat()
+        with LOG_FILE.open("a", encoding="utf-8", newline="\n") as handle:
+            handle.write(f"[{timestamp}] {context}\n{detail.rstrip()}\n\n")
+    except OSError:
+        pass
+    return LOG_FILE
+
+
+LOG_DIR.mkdir(parents=True, exist_ok=True)
+if sys.stdout is None:
+    sys.stdout = open(LOG_FILE.with_name("gui-stdout.log"), "a", encoding="utf-8")
+if sys.stderr is None:
+    sys.stderr = open(LOG_FILE, "a", encoding="utf-8")
+
+
+def _open_path_portably(path: Path, *, select_file: bool = False) -> None:
+    """Open a directory or select a file using the host platform."""
+    path = Path(path).resolve(strict=True)
+    if select_file and path.is_file():
+        if sys.platform.startswith("win"):
+            subprocess.Popen(["explorer", "/select,", str(path)])
+            return
+        path = path.parent
+    if sys.platform.startswith("win"):
+        os.startfile(str(path))  # type: ignore[attr-defined]
+    elif sys.platform == "darwin":
+        subprocess.Popen(["open", str(path)])
+    elif sys.platform.startswith("linux"):
+        subprocess.Popen(["xdg-open", str(path)])
+    elif not webbrowser.open(path.as_uri()):
+        raise OSError(f"No supported folder opener for {sys.platform}")
 
 
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("Civil Registry Dataset Generator")
-        self.geometry("1040x740")
-        self.minsize(1040, 740)
-        self.resizable(False, False)
+        screen_width = self.winfo_screenwidth()
+        screen_height = self.winfo_screenheight()
+        # Leave enough room for the host's taskbar/window chrome, including on
+        # small remote-desktop and accessibility-scaled displays.  The tabs use
+        # scrollable content, so a compact initial window remains usable.
+        width = min(1040, max(480, screen_width - 80))
+        height = min(740, max(360, screen_height - 100))
+        self.geometry(f"{width}x{height}")
+        self.minsize(min(480, width), min(360, height))
+        self.resizable(True, True)
         self.configure(bg=BG)
 
         self.q = queue.Queue()
         self.worker = None
+        self.delete_worker = None
+        self.cancel_event = threading.Event()
+        self._closing = False
+        self._pending_terminal = None
+        self._pending_delete = None
+        self._run_controls = []
+        self._run_control_states = []
         self.start_time = None
         self._last_output = None       # path of the last finished dataset
         self._preview_img = None       # keep a ref so Tk doesn't GC it
         self._dataset_paths = {}       # tree iid -> Path
+        self._refresh_generation = 0
+        self._refresh_worker = None
+        self._refresh_pending = False
+        self._refresh_finalize_scheduled = False
+        self._merge_result = None
 
         self._apply_theme()
         self._build_ui()
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
         self.after(150, self._update_preview)
         self.after(150, self._refresh_datasets)
+        self.after(100, self._poll)
 
     # ------------------------------------------------------------------
     # Theme
@@ -277,14 +355,35 @@ class App(tk.Tk):
 
     # ------------------------------------------------------------------
     def _build_generate_tab(self, parent):
-        # Two-column landscape layout.
-        cols = ttk.Frame(parent)
+        # Keep every control reachable when the window is shortened on a small
+        # laptop display. Width follows the viewport; height can scroll.
+        viewport = tk.Canvas(
+            parent, bg=BG, highlightthickness=0, borderwidth=0
+        )
+        scrollbar = ttk.Scrollbar(
+            parent, orient="vertical", command=viewport.yview
+        )
+        viewport.configure(yscrollcommand=scrollbar.set)
+        scrollbar.pack(side="right", fill="y")
+        viewport.pack(side="left", fill="both", expand=True)
+        content = ttk.Frame(viewport)
+        content_window = viewport.create_window((0, 0), window=content, anchor="nw")
+        content.bind(
+            "<Configure>",
+            lambda _event: viewport.configure(scrollregion=viewport.bbox("all")),
+        )
+        viewport.bind(
+            "<Configure>",
+            lambda event: viewport.itemconfigure(content_window, width=event.width),
+        )
+
+        # Resizable two-column layout: both panes adapt on smaller displays.
+        cols = ttk.Panedwindow(content, orient="horizontal")
         cols.pack(fill="both", expand=True, padx=8, pady=(4, 4))
-        left = ttk.Frame(cols, width=480)
-        left.pack(side="left", fill="y")
-        left.pack_propagate(False)
+        left = ttk.Frame(cols)
         right = ttk.Frame(cols)
-        right.pack(side="left", fill="both", expand=True)
+        cols.add(left, weight=5)
+        cols.add(right, weight=5)
 
         # ================= LEFT: settings =================================
         # ---- Generation settings -----------------------------------------
@@ -294,22 +393,37 @@ class App(tk.Tk):
         crow = ttk.Frame(card1, style="Card.TFrame")
         crow.pack(fill="x", pady=(0, 8))
         ttk.Label(crow, text="Samples", style="CardLabel.TLabel", width=13).pack(side="left")
-        self.count_var = tk.StringVar(value="20000")
-        ttk.Entry(crow, textvariable=self.count_var, width=10).pack(side="left")
+        self.count_var = tk.StringVar(value=str(config.DEFAULT_COUNT))
+        self.count_entry = ttk.Entry(crow, textvariable=self.count_var, width=10)
+        self.count_entry.pack(side="left")
+        self._run_controls.append(self.count_entry)
+
+        srow = ttk.Frame(card1, style="Card.TFrame")
+        srow.pack(fill="x", pady=(0, 8))
+        ttk.Label(srow, text="Seed", style="CardLabel.TLabel", width=13).pack(side="left")
+        self.seed_var = tk.StringVar(value=str(config.RANDOM_SEED))
+        self.seed_entry = ttk.Entry(srow, textvariable=self.seed_var, width=10)
+        self.seed_entry.pack(side="left", padx=(0, 8))
+        self._run_controls.append(self.seed_entry)
+        ttk.Label(srow, text="same seed = same run", style="CardHint.TLabel").pack(side="left")
 
         qp = ttk.Frame(card1, style="Card.TFrame")
         qp.pack(fill="x", pady=(0, 8))
         ttk.Label(qp, text="", width=13).pack(side="left")
         for n in (1_000, 5_000, 20_000, 40_000):
-            ttk.Button(qp, text=f"{n:,}", width=7, style="Quick.TButton",
-                       command=lambda v=n: self.count_var.set(str(v))
-                       ).pack(side="left", padx=2)
+            quick_btn = ttk.Button(
+                qp, text=f"{n:,}", width=7, style="Quick.TButton",
+                command=lambda v=n: self.count_var.set(str(v)))
+            quick_btn.pack(side="left", padx=2)
+            self._run_controls.append(quick_btn)
 
         drow = ttk.Frame(card1, style="Card.TFrame")
         drow.pack(fill="x", pady=(0, 8))
         ttk.Label(drow, text="Dataset folder", style="CardLabel.TLabel", width=13).pack(side="left")
         self.dataset_var = tk.StringVar(value="(next)")
-        ttk.Entry(drow, textvariable=self.dataset_var, width=14).pack(side="left", padx=(0, 8))
+        self.dataset_entry = ttk.Entry(drow, textvariable=self.dataset_var, width=14)
+        self.dataset_entry.pack(side="left", padx=(0, 8))
+        self._run_controls.append(self.dataset_entry)
         ttk.Label(drow, text="blank = next", style="CardHint.TLabel").pack(side="left")
 
         nrow = ttk.Frame(card1, style="Card.TFrame")
@@ -318,8 +432,11 @@ class App(tk.Tk):
         versions = config.name_versions() or [config.NAMES_VERSION]
         default_v = config.NAMES_VERSION if config.NAMES_VERSION in versions else versions[0]
         self.names_var = tk.StringVar(value=default_v)
-        ttk.Combobox(nrow, textvariable=self.names_var, values=versions,
-                     state="readonly", width=12).pack(side="left")
+        self.names_cb = ttk.Combobox(
+            nrow, textvariable=self.names_var, values=versions,
+            state="readonly", width=12)
+        self.names_cb.pack(side="left")
+        self._run_controls.append(self.names_cb)
 
         # ---- Style settings ----------------------------------------------
         self._section_label(left, "Style")
@@ -331,8 +448,11 @@ class App(tk.Tk):
         self.mode_by_label = {label: key for key, label in config.SAMPLE_MODES.items()}
         mode_labels = list(self.mode_by_label)
         self.sample_mode_var = tk.StringVar(value=config.SAMPLE_MODES[config.DEFAULT_SAMPLE_MODE])
-        ttk.Combobox(mrow, textvariable=self.sample_mode_var, values=mode_labels,
-                     state="readonly", width=26).pack(side="left")
+        self.sample_mode_cb = ttk.Combobox(
+            mrow, textvariable=self.sample_mode_var, values=mode_labels,
+            state="readonly", width=26)
+        self.sample_mode_cb.pack(side="left")
+        self._run_controls.append(self.sample_mode_cb)
 
         frow = ttk.Frame(card2, style="Card.TFrame")
         frow.pack(fill="x", pady=(0, 8))
@@ -344,6 +464,7 @@ class App(tk.Tk):
                                state="readonly", width=26)
         font_cb.pack(side="left")
         font_cb.bind("<<ComboboxSelected>>", self._on_font_style_change)
+        self._run_controls.append(font_cb)
 
         # Cursive sub-style row (hidden until "Cursive only")
         self.cursive_row = ttk.Frame(card2, style="Card.TFrame")
@@ -357,6 +478,7 @@ class App(tk.Tk):
                                        state="readonly", width=26)
         self.cursive_cb.pack(side="left")
         self.cursive_cb.bind("<<ComboboxSelected>>", self._on_cursive_group_change)
+        self._run_controls.append(self.cursive_cb)
 
         # Specific font row (hidden until "Cursive only")
         self.specific_row = ttk.Frame(card2, style="Card.TFrame")
@@ -370,16 +492,23 @@ class App(tk.Tk):
         self.specific_cb.pack(side="left")
         self.specific_cb.bind("<<ComboboxSelected>>", lambda e: self._update_preview())
         self.specific_font_map = {"All in group": ""}   # display -> stem
+        self._run_controls.append(self.specific_cb)
 
         # ---- Options -----------------------------------------------------
         self._section_label(left, "Options")
         card3 = self._card(left, pady=(0, 4))
         self.real_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(card3, text="Merge real (mock) data afterwards",
-                        variable=self.real_var).pack(anchor="w", pady=(0, 4))
+        self.real_check = ttk.Checkbutton(
+            card3, text="Merge real (mock) data afterwards",
+            variable=self.real_var)
+        self.real_check.pack(anchor="w", pady=(0, 4))
+        self._run_controls.append(self.real_check)
         self.zip_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(card3, text="Package dataset as .zip when done",
-                        variable=self.zip_var).pack(anchor="w")
+        self.zip_check = ttk.Checkbutton(
+            card3, text="Package dataset as .zip when done",
+            variable=self.zip_var)
+        self.zip_check.pack(anchor="w")
+        self._run_controls.append(self.zip_check)
 
         # ================= RIGHT: preview + progress ======================
         self._section_label(right, "Preview")
@@ -425,14 +554,16 @@ class App(tk.Tk):
         tree_wrap.pack(fill="both", expand=True)
 
         self.tree = ttk.Treeview(tree_wrap,
-                                 columns=("folder_size", "zip_size"),
+                                 columns=("folder_size", "zip_size", "checksum"),
                                  show="tree headings", height=12, selectmode="browse")
         self.tree.heading("#0",          text="Dataset")
         self.tree.heading("folder_size", text="Folder size")
         self.tree.heading("zip_size",    text="Zip size")
+        self.tree.heading("checksum",    text="SHA256")
         self.tree.column("#0",          width=280, anchor="w")
         self.tree.column("folder_size", width=110, anchor="center")
         self.tree.column("zip_size",    width=110, anchor="center")
+        self.tree.column("checksum",    width=80, anchor="center")
         self.tree.pack(side="left", fill="both", expand=True)
         self.tree.bind("<Double-1>", lambda e: self._open_selected_dataset())
 
@@ -441,19 +572,28 @@ class App(tk.Tk):
         self.tree.configure(yscrollcommand=vsb.set)
 
         hint = ttk.Label(parent,
-                         text="📦 = .zip archive exists alongside the folder.  "
-                              "Deleting a dataset also removes its .zip.",
+                         text="📦 = .zip archive exists. Deleting a dataset also "
+                              "removes its .zip and .zip.sha256 sidecar.",
                          style="Sub.TLabel")
         hint.pack(anchor="w", padx=16, pady=(2, 8))
 
+        self.dataset_status = ttk.Label(parent, text="", style="Status.TLabel")
+        self.dataset_status.pack(anchor="w", padx=16, pady=(0, 6))
+
         btn_row = ttk.Frame(parent)
         btn_row.pack(fill="x", padx=16, pady=(0, 12))
-        ttk.Button(btn_row, text="🔄  Refresh", style="Secondary.TButton",
-                   command=self._refresh_datasets).pack(side="left")
-        ttk.Button(btn_row, text="📂  Open", style="Secondary.TButton",
-                   command=self._open_selected_dataset).pack(side="left", padx=(8, 0))
-        ttk.Button(btn_row, text="🗑  Delete", style="Danger.TButton",
-                   command=self._delete_selected_dataset).pack(side="right")
+        self.refresh_btn = ttk.Button(
+            btn_row, text="🔄  Refresh", style="Secondary.TButton",
+            command=self._refresh_datasets)
+        self.refresh_btn.pack(side="left")
+        self.dataset_open_btn = ttk.Button(
+            btn_row, text="📂  Open", style="Secondary.TButton",
+            command=self._open_selected_dataset)
+        self.dataset_open_btn.pack(side="left", padx=(8, 0))
+        self.delete_btn = ttk.Button(
+            btn_row, text="🗑  Delete", style="Danger.TButton",
+            command=self._delete_selected_dataset)
+        self.delete_btn.pack(side="right")
 
     # ------------------------------------------------------------------
     # Tab change
@@ -606,11 +746,22 @@ class App(tk.Tk):
         """Sibling .zip path for a dataset folder."""
         return folder.parent / (folder.name + ".zip")
 
+    @staticmethod
+    def _checksum_for(folder):
+        """Sibling SHA-256 sidecar produced for a dataset ZIP."""
+        return folder.parent / (folder.name + ".zip.sha256")
+
     # ------------------------------------------------------------------
     # Datasets list — two-phase: instant skeleton, background sizes
     # ------------------------------------------------------------------
     def _refresh_datasets(self):
-        if not hasattr(self, "tree"):
+        if "tree" not in self.__dict__:
+            return
+        self._refresh_generation = self.__dict__.get("_refresh_generation", 0) + 1
+        generation = self._refresh_generation
+        refresh_worker = self.__dict__.get("_refresh_worker")
+        if refresh_worker is not None and refresh_worker.is_alive():
+            self._refresh_pending = True
             return
         self.tree.delete(*self.tree.get_children())
         self._dataset_paths.clear()
@@ -618,36 +769,98 @@ class App(tk.Tk):
         base = config.DATASETS_DIR
         if not base.exists():
             return
-        folders = [p for p in base.iterdir() if p.is_dir()]
-        folders.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+        try:
+            folder_times = []
+            for path in base.iterdir():
+                try:
+                    # Generator staging/transaction directories and reservation
+                    # markers are private implementation details, never complete
+                    # datasets.  Hiding all dot-prefixed entries also prevents a
+                    # partial run from becoming selectable or deletable.
+                    if (not path.name.startswith(".") and path.is_dir()
+                            and not path.is_symlink()):
+                        folder_times.append((path.stat().st_mtime, path))
+                except OSError:
+                    continue
+            folders = [path for _mtime, path in sorted(folder_times, reverse=True)]
+        except OSError as exc:
+            _log_error("dataset refresh", traceback.format_exc())
+            self.status.config(text=f"Could not refresh datasets: {exc}", foreground=ERROR_C)
+            return
 
         # Phase 1: insert rows immediately with placeholder sizes
         iid_folder = []
         for folder in folders:
             zip_path = self._zip_for(folder)
-            has_zip = zip_path.exists()
+            checksum_path = self._checksum_for(folder)
+            has_zip = zip_path.is_file()
+            has_checksum = checksum_path.is_file()
             label = f"  {'📦' if has_zip else '📁'}  {folder.name}"
             iid = self.tree.insert("", "end", text=label,
-                                   values=("…", "…" if has_zip else "—"))
+                                   values=("…", "…" if has_zip else "—",
+                                           "yes" if has_checksum else "—"))
             self._dataset_paths[iid] = folder
-            iid_folder.append((iid, folder, zip_path, has_zip))
+            iid_folder.append(
+                (iid, folder, zip_path, checksum_path, has_zip, has_checksum)
+            )
 
-        # Phase 2: compute sizes off the UI thread, patch back via after()
+        # Phase 2: compute sizes off the UI thread. It communicates exclusively
+        # through the queue; only _poll touches Tk.  Do not start a second scan
+        # while the first is traversing a large tree; coalesce refresh requests
+        # and run the latest generation once the active scan exits.
+        self._refresh_pending = False
+
         def _compute():
-            for iid, folder, zip_path, has_zip in iid_folder:
-                folder_sz = self._fmt_size(self._folder_size_fast(folder))
-                zip_sz = (self._fmt_size(zip_path.stat().st_size)
-                          if has_zip else "—")
-                self.after(0, self._patch_row, iid, folder_sz, zip_sz)
+            try:
+                for iid, folder, zip_path, checksum_path, has_zip, has_checksum in iid_folder:
+                    if generation != self._refresh_generation:
+                        return
+                    folder_sz = self._fmt_size(self._folder_size_fast(folder))
+                    try:
+                        zip_sz = (
+                            self._fmt_size(zip_path.stat().st_size) if has_zip else "—"
+                        )
+                    except OSError:
+                        zip_sz = "—"
+                        has_zip = False
+                    checksum_status = (
+                        "yes" if has_checksum and checksum_path.is_file() else "—"
+                    )
+                    self.q.put((
+                        "dataset_size", generation, iid, folder_sz, zip_sz,
+                        checksum_status,
+                    ))
+            finally:
+                self.q.put(("refresh_complete", generation))
 
-        threading.Thread(target=_compute, daemon=True).start()
+        self._refresh_worker = threading.Thread(target=_compute, daemon=True)
+        self._refresh_worker.start()
 
-    def _patch_row(self, iid, folder_sz, zip_sz):
+    def _patch_row(self, generation, iid, folder_sz, zip_sz, checksum_status):
         """Update a single treeview row with computed sizes (runs on UI thread)."""
+        if generation != self._refresh_generation or iid not in self._dataset_paths:
+            return
         try:
-            self.tree.item(iid, values=(folder_sz, zip_sz))
+            if self.tree.exists(iid):
+                self.tree.item(
+                    iid, values=(folder_sz, zip_sz, checksum_status)
+                )
         except tk.TclError:
             pass  # row was deleted before size came back
+
+    def _finish_refresh_worker(self):
+        """Join the sole refresh worker, then run one coalesced refresh."""
+        worker = self._refresh_worker
+        if worker is not None and worker.is_alive():
+            self.after(25, self._finish_refresh_worker)
+            return
+        if worker is not None:
+            worker.join(timeout=0)
+        self._refresh_worker = None
+        self._refresh_finalize_scheduled = False
+        if self._refresh_pending:
+            self._refresh_pending = False
+            self.after(0, self._refresh_datasets)
 
     def _selected_dataset(self):
         sel = self.tree.selection()
@@ -660,34 +873,91 @@ class App(tk.Tk):
         if not folder:
             messagebox.showinfo("No selection", "Select a dataset from the list first.")
             return
-        if folder.exists():
-            subprocess.Popen(["explorer", str(folder)])
+        try:
+            _open_path_portably(folder)
+        except Exception as exc:
+            log_path = _log_error("open dataset folder", traceback.format_exc())
+            messagebox.showerror(
+                "Open failed", f"{exc}\n\nFull details were saved to:\n{log_path}"
+            )
 
     def _delete_selected_dataset(self):
+        if self._any_worker_is_alive():
+            messagebox.showwarning(
+                "Background work in progress",
+                "Datasets cannot be deleted while another operation is running.")
+            return
+
         folder = self._selected_dataset()
         if not folder:
             messagebox.showinfo("No selection", "Select a dataset to delete first.")
             return
 
         zip_path = self._zip_for(folder)
+        checksum_path = self._checksum_for(folder)
         msg = f"Delete dataset '{folder.name}'?\n\nThis permanently removes the folder"
         if zip_path.exists():
             msg += f" and its archive ({zip_path.name})"
+        if checksum_path.exists():
+            msg += f" and checksum ({checksum_path.name})"
         msg += ".\nThis cannot be undone."
 
         if not messagebox.askyesno("Confirm delete", msg, icon="warning"):
             return
 
-        try:
-            if folder.exists():
-                shutil.rmtree(folder)
-            if zip_path.exists():
-                zip_path.unlink()
-        except Exception as e:
-            messagebox.showerror("Delete failed", str(e))
-            return
+        self._set_dataset_operation_active(True)
+        self.dataset_status.config(
+            text=f"Deleting {folder.name}…", foreground=WARNING
+        )
+        self.delete_worker = threading.Thread(
+            target=self._delete_dataset_worker,
+            args=(folder, zip_path, checksum_path),
+            daemon=False,
+        )
+        self.delete_worker.start()
 
-        self._refresh_datasets()
+    @staticmethod
+    def _validated_dataset_sidecar(folder: Path, suffix: str) -> Path:
+        """Return one exact direct-child archive sidecar without following links."""
+        safe_folder = config.assert_safe_dataset_dir(folder)
+        candidate = safe_folder.parent / f"{safe_folder.name}{suffix}"
+        if candidate.parent.resolve(strict=True) != config.DATASETS_DIR.resolve(strict=True):
+            raise ValueError(f"Unsafe dataset sidecar path: {candidate}")
+        if candidate.is_symlink():
+            raise ValueError(f"Dataset sidecar must not be a symlink: {candidate}")
+        if candidate.exists() and not candidate.is_file():
+            raise ValueError(f"Dataset sidecar is not a regular file: {candidate}")
+        return candidate
+
+    def _delete_dataset_worker(
+        self, folder: Path, zip_path: Path, checksum_path: Path
+    ) -> None:
+        """Delete validated dataset artifacts without invoking any Tk method."""
+        try:
+            folder = config.assert_safe_dataset_dir(folder)
+            expected_zip = self._validated_dataset_sidecar(folder, ".zip")
+            expected_checksum = self._validated_dataset_sidecar(folder, ".zip.sha256")
+            if zip_path != expected_zip or checksum_path != expected_checksum:
+                raise ValueError("Dataset deletion targets changed before deletion")
+            self.q.put(("delete_status", f"Deleting {folder.name} folder…"))
+            removed_folder = guarded_remove_dataset(folder)
+            self.q.put(("delete_status", f"Deleting {folder.name} archive…"))
+            removed_zip = False
+            removed_checksum = False
+            if expected_zip.exists():
+                expected_zip.unlink()
+                removed_zip = True
+            if expected_checksum.exists():
+                expected_checksum.unlink()
+                removed_checksum = True
+            self.q.put((
+                "delete_done", folder.name, removed_folder, removed_zip,
+                removed_checksum,
+            ))
+        except Exception as exc:
+            detail = traceback.format_exc()
+            log_path = _log_error("dataset deletion", detail)
+            self.q.put(("delete_error", str(exc) or exc.__class__.__name__, str(log_path)))
 
     # ------------------------------------------------------------------
     # Open last output in Explorer
@@ -695,15 +965,107 @@ class App(tk.Tk):
     def _open_output(self):
         if not self._last_output:
             return
-        path = self._last_output
-        if path.endswith(".zip"):
-            subprocess.Popen(["explorer", "/select,", path])
-        else:
-            subprocess.Popen(["explorer", path])
+        path = Path(self._last_output)
+        try:
+            _open_path_portably(path, select_file=path.suffix.lower() == ".zip")
+        except Exception as exc:
+            log_path = _log_error("open generated output", traceback.format_exc())
+            messagebox.showerror(
+                "Open failed", f"{exc}\n\nFull details were saved to:\n{log_path}"
+            )
 
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
+    def _worker_is_alive(self):
+        """Return whether the generation worker is still executing."""
+        worker = self.__dict__.get("worker")
+        return worker is not None and worker.is_alive()
+
+    def _delete_worker_is_alive(self):
+        worker = self.__dict__.get("delete_worker")
+        return worker is not None and worker.is_alive()
+
+    def _any_worker_is_alive(self):
+        return self._worker_is_alive() or self._delete_worker_is_alive()
+
+    def _set_dataset_operation_active(self, active):
+        """Lock dataset controls while background deletion is in flight."""
+        state = "disabled" if active else "normal"
+        for name in ("refresh_btn", "dataset_open_btn", "delete_btn"):
+            widget = self.__dict__.get(name)
+            if widget is not None:
+                widget.config(state=state)
+        if "btn" in self.__dict__:
+            self.btn.config(state=state)
+
+    def _set_job_active(self, active):
+        """Lock or restore controls whose values affect the active run."""
+        if active:
+            self._run_control_states = []
+            for widget in self._run_controls:
+                try:
+                    state = str(widget.cget("state"))
+                    self._run_control_states.append((widget, state))
+                    widget.config(state="disabled")
+                except tk.TclError:
+                    continue
+            self.btn.config(text="Cancel Generation", command=self.cancel,
+                            state="normal")
+            self.delete_btn.config(state="disabled")
+            return
+
+        for widget, state in self._run_control_states:
+            try:
+                widget.config(state=state)
+            except tk.TclError:
+                continue
+        self._run_control_states = []
+        self.btn.config(text="⚡  Generate Dataset", command=self.start,
+                        state="normal")
+        if not self._delete_worker_is_alive():
+            self.delete_btn.config(state="normal")
+
+    def _signal_cancel(self):
+        """Ask the worker to stop at its next safe cancellation boundary."""
+        self.cancel_event.set()
+        self.btn.config(text="Cancelling…", state="disabled")
+        self.delete_btn.config(state="disabled")
+        self.status.config(
+            text="Cancelling… waiting for the current operation to finish safely.",
+            foreground=WARNING)
+
+    def cancel(self):
+        """Confirm and request cooperative cancellation of the active job."""
+        if not self._worker_is_alive() or self.cancel_event.is_set():
+            return
+        if messagebox.askyesno(
+                "Cancel generation",
+                "Cancel the active generation job?\n\n"
+                "The current sample or packaging operation will finish safely first.",
+                icon="warning"):
+            self._signal_cancel()
+
+    def _on_close(self):
+        """Keep the window alive until an active worker exits safely."""
+        if not self._any_worker_is_alive():
+            self.destroy()
+            return
+        if self._closing:
+            return
+        generation_active = self._worker_is_alive()
+        title = "Generation in progress" if generation_active else "Deletion in progress"
+        prompt = (
+            "Generation is still running. Cancel it and close after the worker "
+            "exits safely?" if generation_active else
+            "Dataset deletion is still running. Close after it finishes safely?"
+        )
+        if not messagebox.askyesno(title, prompt, icon="warning"):
+            return
+        self._closing = True
+        if generation_active:
+            self._signal_cancel()
+
     @staticmethod
     def _fmt(seconds: float) -> str:
         seconds = int(round(seconds))
@@ -715,24 +1077,31 @@ class App(tk.Tk):
     # Start generation
     # ------------------------------------------------------------------
     def start(self):
-        if self.worker and self.worker.is_alive():
+        if self._any_worker_is_alive():
             return
         try:
             count = int(self.count_var.get().replace(",", "").strip())
-            if count <= 0:
-                raise ValueError
+            config.validate_config(count)
+        except (TypeError, ValueError) as exc:
+            messagebox.showerror("Invalid input", str(exc))
+            return
+        warning_count = getattr(config, "LARGE_GENERATION_WARNING_COUNT", None)
+        if warning_count is not None and count >= warning_count:
+            if not messagebox.askyesno(
+                "Large generation job",
+                f"Generate {count:,} samples? This may require substantial disk "
+                "space and time.",
+                icon="warning",
+            ):
+                return
+        try:
+            seed = int(self.seed_var.get().strip())
         except ValueError:
-            messagebox.showerror("Invalid input", "Please enter a positive whole number.")
+            messagebox.showerror("Invalid input", "Seed must be a whole number.")
             return
 
-        self.btn.config(state="disabled")
-        self.open_btn.config(state="disabled")
-        self._last_output = None
-        self.progress.config(maximum=count, value=0)
-        self.status.config(text="Starting…", foreground=WARNING)
-        self.timer.config(text="")
-        self.start_time = time.time()
-
+        # Snapshot every Tk-backed option on the UI thread. The worker receives
+        # plain Python values and never calls Tk while it is running.
         dataset = self.dataset_var.get().strip()
         if dataset in ("", "(next)"):
             dataset = None
@@ -740,48 +1109,143 @@ class App(tk.Tk):
         sample_mode = self.mode_by_label.get(
             self.sample_mode_var.get(), config.DEFAULT_SAMPLE_MODE)
         font_style, cursive_group, specific_font = self._current_font_selection()
+        merge_real = bool(self.real_var.get())
+        package_zip = bool(self.zip_var.get())
+
+        self.cancel_event.clear()
+        self._pending_terminal = None
+        self._set_job_active(True)
+        self.open_btn.config(state="disabled")
+        self._last_output = None
+        self.progress.config(maximum=count, value=0)
+        self.status.config(text="Starting…", foreground=WARNING)
+        self.timer.config(text="")
+        self.start_time = time.time()
 
         self.worker = threading.Thread(
             target=self._run,
-            args=(count, dataset, names_version, sample_mode,
-                  font_style, cursive_group, specific_font),
-            daemon=True)
+            args=(count, dataset, seed, names_version, sample_mode,
+                  font_style, cursive_group, specific_font,
+                  merge_real, package_zip, self.cancel_event),
+            daemon=False)
         self.worker.start()
-        self.after(100, self._poll)
 
     # ------------------------------------------------------------------
     # Worker thread
     # ------------------------------------------------------------------
-    def _run(self, count, dataset, names_version, sample_mode,
-             font_style, cursive_group, specific_font):
+    def _run(self, count, dataset, seed, names_version, sample_mode,
+             font_style, cursive_group, specific_font,
+             merge_real, package_zip, cancel_event):
         try:
             def cb(done, total, field_type):
                 self.q.put(("progress", done, total, field_type))
 
-            out_dir = generate(count, dataset=dataset, names_version=names_version,
+            out_dir = generate(count, dataset=dataset, seed=seed,
+                               names_version=names_version,
                                sample_mode=sample_mode, font_style=font_style,
                                cursive_group=cursive_group, specific_font=specific_font,
-                               progress_callback=cb, show_bar=False)
-            if self.real_var.get():
+                               progress_callback=cb, show_bar=False,
+                               cancel_event=cancel_event,
+                               archive_planned=package_zip)
+            if cancel_event.is_set():
+                self.q.put(("cancelled", "Generation cancelled safely."))
+                return
+            merge_payload = None
+            if merge_real:
                 self.q.put(("status", "Merging real data…"))
-                build(out_dir.name)
+                merge_result = build(out_dir.name)
+                merge_payload = {
+                    name: getattr(merge_result, name)
+                    for name in (
+                        "copied", "unchanged", "removed", "skipped", "failed"
+                    )
+                }
+                self.q.put(("merge_result", merge_payload))
+            if cancel_event.is_set():
+                self.q.put(("cancelled", "Generation cancelled safely."))
+                return
             out = str(out_dir)
-            if self.zip_var.get():
+            if package_zip:
                 self.q.put(("status", "Packaging .zip…"))
-                out = str(zip_dataset(out_dir))
-            self.q.put(("done", count, out))
+                out = str(zip_dataset(out_dir, cancel_event=cancel_event))
+            if cancel_event.is_set():
+                self.q.put(("cancelled", "Generation cancelled safely."))
+                return
+            self.q.put(("done", count, out, seed, merge_payload))
+        except GenerationCancelled as exc:
+            detail = str(exc).strip()
+            self.q.put(("cancelled", detail or "Generation cancelled safely."))
         except Exception as e:
-            self.q.put(("error", str(e)))
+            detail = str(e).strip()
+            log_path = _log_error("generation worker", traceback.format_exc())
+            self.q.put((
+                "error", detail or e.__class__.__name__, str(log_path)
+            ))
 
     # ------------------------------------------------------------------
     # Poll queue (UI thread)
     # ------------------------------------------------------------------
+    def _finish_job(self, msg):
+        """Apply one terminal worker result after the worker has exited."""
+        kind = msg[0]
+        total_time = time.time() - self.start_time
+        self._set_job_active(False)
+
+        if kind == "done":
+            self.progress.config(value=self.progress["maximum"])
+            self.status.config(
+                text=f"✓  Done — {msg[1]:,} samples generated.",
+                foreground=SUCCESS)
+            self.timer.config(text=f"Total time: {self._fmt(total_time)}")
+            self._last_output = msg[2]
+            self.open_btn.config(state="normal")
+            self._refresh_datasets()
+            merge_result = msg[4] if len(msg) > 4 else None
+            merge_summary = ""
+            no_op = False
+            if merge_result is not None:
+                merge_summary = (
+                    "\n\nReal merge:\n"
+                    f"  copied: {merge_result['copied']}\n"
+                    f"  unchanged: {merge_result['unchanged']}\n"
+                    f"  removed: {merge_result['removed']}\n"
+                    f"  skipped: {merge_result['skipped']}\n"
+                    f"  failed: {merge_result['failed']}"
+                )
+                no_op = (
+                    merge_result["copied"] == 0
+                    and merge_result["removed"] == 0
+                    and merge_result["failed"] == 0
+                )
+                if no_op:
+                    merge_summary += "\n\nWarning: real merge made no dataset changes."
+            messagebox.showinfo(
+                "Generation complete",
+                f"Generated {msg[1]:,} samples in {self._fmt(total_time)}.\n"
+                f"Effective seed: {msg[3]}\n\n"
+                f"Output:\n{msg[2]}{merge_summary}")
+            return
+
+        self.open_btn.config(state="disabled")
+        self.timer.config(text=f"Elapsed: {self._fmt(total_time)}")
+        self._refresh_datasets()
+        if kind == "cancelled":
+            self.status.config(text="Generation cancelled safely.",
+                               foreground=WARNING)
+            return
+
+        self.status.config(text="✗  Error — see details.", foreground=ERROR_C)
+        log_note = f"\n\nFull details were saved to:\n{msg[2]}" if len(msg) > 2 else ""
+        messagebox.showerror("Error", f"{msg[1]}{log_note}")
+
     def _poll(self):
         try:
             while True:
                 msg = self.q.get_nowait()
                 kind = msg[0]
                 if kind == "progress":
+                    if getattr(self, "cancel_event", threading.Event()).is_set():
+                        continue
                     _, done, total, field_type = msg
                     self.progress.config(value=done)
                     pct = done / total * 100 if total else 0
@@ -797,29 +1261,97 @@ class App(tk.Tk):
                                  f"~{self._fmt(remaining)} left  ·  "
                                  f"{rate:.0f} img/s")
                 elif kind == "status":
-                    self.status.config(text=msg[1], foreground=WARNING)
-                elif kind == "done":
-                    total_time = time.time() - self.start_time
-                    self.progress.config(value=self.progress["maximum"])
-                    self.status.config(
-                        text=f"✓  Done — {msg[1]:,} samples generated.",
-                        foreground=SUCCESS)
-                    self.timer.config(text=f"Total time: {self._fmt(total_time)}")
-                    self.btn.config(state="normal")
-                    self._last_output = msg[2]
-                    self.open_btn.config(state="normal")
-                    self._refresh_datasets()
-                    messagebox.showinfo(
-                        "Generation complete",
-                        f"Generated {msg[1]:,} samples in {self._fmt(total_time)}.\n\nOutput:\n{msg[2]}")
-                    return
-                elif kind == "error":
-                    self.status.config(text="✗  Error — see details.", foreground=ERROR_C)
-                    self.btn.config(state="normal")
-                    messagebox.showerror("Error", msg[1])
-                    return
+                    if not self.cancel_event.is_set():
+                        self.status.config(text=msg[1], foreground=WARNING)
+                elif kind == "merge_result":
+                    self._merge_result = msg[1]
+                elif kind == "dataset_size":
+                    self._patch_row(*msg[1:])
+                elif kind == "refresh_complete":
+                    if not self.__dict__.get("_refresh_finalize_scheduled", False):
+                        self._refresh_finalize_scheduled = True
+                        self.after(0, self._finish_refresh_worker)
+                elif kind == "delete_status":
+                    if "dataset_status" in self.__dict__:
+                        self.dataset_status.config(text=msg[1], foreground=WARNING)
+                elif kind in ("delete_done", "delete_error"):
+                    self._pending_delete = msg
+                elif kind in ("done", "cancelled", "error"):
+                    self._pending_terminal = msg
         except queue.Empty:
             pass
+
+        if self._pending_terminal is not None:
+            # A terminal result is queued immediately before _run returns. Do
+            # not re-enable destructive controls or close Tk until it is gone.
+            if self._worker_is_alive():
+                self.after(50, self._poll)
+                return
+            msg = self._pending_terminal
+            self._pending_terminal = None
+            if self.worker is not None:
+                self.worker.join(timeout=0)
+            self.worker = None
+            if self._closing and not self._delete_worker_is_alive():
+                self.destroy()
+                return
+            self._finish_job(msg)
+
+        pending_delete = self.__dict__.get("_pending_delete")
+        if pending_delete is not None:
+            if self._delete_worker_is_alive():
+                self.after(50, self._poll)
+                return
+            self._pending_delete = None
+            if self.delete_worker is not None:
+                self.delete_worker.join(timeout=0)
+            self.delete_worker = None
+            if self._closing and not self._worker_is_alive():
+                self.destroy()
+                return
+            self._set_dataset_operation_active(False)
+            if pending_delete[0] == "delete_done":
+                _kind, name, removed_folder, removed_zip, removed_checksum = pending_delete
+                removed = sum((removed_folder, removed_zip, removed_checksum))
+                self.dataset_status.config(
+                    text=f"Deleted {name} ({removed} artifact(s)).",
+                    foreground=SUCCESS,
+                )
+                self._refresh_datasets()
+            else:
+                self.dataset_status.config(text="Deletion failed.", foreground=ERROR_C)
+                messagebox.showerror(
+                    "Delete failed",
+                    f"{pending_delete[1]}\n\nFull details were saved to:\n"
+                    f"{pending_delete[2]}",
+                )
+
+        if self.worker is not None and not self._worker_is_alive():
+            # A normal/cancelled/error path always queues a terminal result.
+            # Recheck once after observing thread exit to cover the narrow
+            # queue hand-off race before reporting an unexpected stop.
+            try:
+                msg = self.q.get_nowait()
+            except queue.Empty:
+                msg = ("error", "Generation worker stopped without a result.")
+            if msg[0] in ("done", "cancelled", "error"):
+                self._pending_terminal = msg
+            else:
+                self._pending_terminal = (
+                    "error", "Generation worker stopped without a result.")
+            self.after(0, self._poll)
+            return
+
+        if self.delete_worker is not None and not self._delete_worker_is_alive():
+            # Mirror the generation hand-off guard for unexpected delete-worker
+            # exits that did not enqueue a result.
+            self._pending_delete = (
+                "delete_error",
+                "Dataset deletion worker stopped without a result.",
+                str(LOG_FILE),
+            )
+            self.after(0, self._poll)
+            return
         self.after(100, self._poll)
 
 

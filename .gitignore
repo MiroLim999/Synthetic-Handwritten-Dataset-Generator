@@ -4,7 +4,21 @@ dataset/
 # downloaded font files (license-dependent, user-provided)
 resources/fonts/*
 !resources/fonts/.gitkeep
+!resources/fonts/README.md
+!resources/fonts/FONT_MANIFEST.example.csv
+!resources/fonts/LICENSES/
+!resources/fonts/LICENSES/.gitkeep
+
+# local font inventory contains installation-specific paths/checksums
+resources/fonts/FONT_MANIFEST.csv
 
 __pycache__/
 *.pyc
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.coverage
+htmlcov/
+.venv/
+venv/
 .DS_Store
