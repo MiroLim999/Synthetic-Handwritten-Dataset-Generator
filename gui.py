@@ -559,6 +559,18 @@ class App(tk.Tk):
         self._run_controls.append(self.dataset_entry)
         ttk.Label(drow, text="blank = next", style="CardHint.TLabel").pack(side="left")
 
+        wrow = ttk.Frame(card1, style="Card.TFrame")
+        wrow.pack(fill="x", pady=(0, 8))
+        ttk.Label(wrow, text="CPU Threads", style="CardLabel.TLabel", width=13).pack(side="left")
+        cpu_max = os.cpu_count() or 16
+        thread_opts = ["Auto (Max)"] + [str(i) for i in range(1, min(cpu_max + 1, 33))]
+        self.workers_var = tk.StringVar(value="Auto (Max)")
+        self.workers_cb = ttk.Combobox(wrow, textvariable=self.workers_var, values=thread_opts, state="readonly", width=12)
+        self.workers_cb.pack(side="left", padx=(0, 8))
+        self.workers_cb.bind("<<ComboboxSelected>>", lambda e: self._update_preflight_estimates())
+        self._run_controls.append(self.workers_cb)
+        ttk.Label(wrow, text=f"Max: {cpu_max} threads", style="CardHint.TLabel").pack(side="left")
+
         nrow = ttk.Frame(card1, style="Card.TFrame")
         nrow.pack(fill="x")
         ttk.Label(nrow, text="Names pool", style="CardLabel.TLabel", width=13).pack(side="left")
@@ -1230,6 +1242,8 @@ class App(tk.Tk):
         self.edge_clipping_var.set(config.EDGE_CLIPPING_OPTIONS[config.DEFAULT_EDGE_CLIPPING])
         self.count_var.set(str(config.DEFAULT_COUNT))
         self.seed_var.set(str(config.RANDOM_SEED))
+        if hasattr(self, "workers_var"):
+            self.workers_var.set("Auto (Max)")
         if hasattr(self, "names_var") and hasattr(config, "NAMES_VERSION"):
             self.names_var.set(config.NAMES_VERSION)
         self.font_style_var.set("All fonts")
@@ -1965,6 +1979,16 @@ class App(tk.Tk):
                 messagebox.showerror("Invalid field weights", f"Field weights must be non-negative integers: {exc}")
                 return
 
+        # Extract custom workers count
+        workers_count = None
+        if hasattr(self, "workers_var"):
+            w_str = self.workers_var.get().strip()
+            if w_str and not w_str.startswith("Auto"):
+                try:
+                    workers_count = int(w_str)
+                except ValueError:
+                    workers_count = None
+
         self.cancel_event.clear()
         self._pending_terminal = None
         self._set_job_active(True)
@@ -1981,7 +2005,7 @@ class App(tk.Tk):
                   font_style, cursive_group, specific_font,
                   merge_real, package_zip, self.cancel_event,
                   augmentation_profile, edge_clipping, semi_broken_params,
-                  custom_field_weights, custom_split_fractions),
+                  custom_field_weights, custom_split_fractions, workers_count),
             daemon=False)
         self.worker.start()
 
@@ -1995,7 +2019,8 @@ class App(tk.Tk):
              edge_clipping=config.DEFAULT_EDGE_CLIPPING,
              semi_broken_params=None,
              custom_field_weights=None,
-             custom_split_fractions=None):
+             custom_split_fractions=None,
+             workers=None):
         try:
             def cb(done, total, field_type):
                 self.q.put(("progress", done, total, field_type))
@@ -2011,7 +2036,8 @@ class App(tk.Tk):
                                edge_clipping=edge_clipping,
                                semi_broken_params=semi_broken_params,
                                custom_field_weights=custom_field_weights,
-                               custom_split_fractions=custom_split_fractions)
+                               custom_split_fractions=custom_split_fractions,
+                               workers=workers)
             if cancel_event.is_set():
                 self.q.put(("cancelled", "Generation cancelled safely."))
                 return

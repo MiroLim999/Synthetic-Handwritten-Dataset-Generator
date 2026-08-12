@@ -545,32 +545,9 @@ def generate(count: int, dataset=None, seed: int = config.RANDOM_SEED,
              edge_clipping: str | tuple[float, float, float, float] = "none",
              semi_broken_params: dict | None = None,
              custom_field_weights: dict[str, int] | None = None,
-             custom_split_fractions: tuple[float, float, float] | None = None):
-    """
-    Generate `count` synthetic samples into a numbered dataset folder.
-
-    dataset:
-        None        -> auto-pick the next free folder (dataset_001, _002, ...)
-        int/str     -> dataset/datasets/dataset_<n> or dataset/datasets/<name>
-    names_version:
-        None        -> use config.NAMES_VERSION (default name pool)
-        'name1'/'name2'/... -> draw names from resources/<names_version>
-    sample_mode:
-        regular / semi_broken_mixed / semi_broken_words /
-        semi_broken_characters / semi_broken_numerics
-    font_style:
-        'all'     -> use every available handwriting font (default)
-        'cursive' -> restrict to cursive/script fonts only
-    cursive_group:
-        Sub-style group name (only used when font_style == 'cursive').
-        E.g. 'Palmer / School cursive', 'Elegant calligraphy', etc.
-        Empty string means all cursive fonts.
-    specific_font:
-        Exact font filename/stem to render every sample in. Empty means
-        use the whole pool selected by font_style / cursive_group.
-
-    Returns the output Path of the dataset folder that was created.
-    """
+             custom_split_fractions: tuple[float, float, float] | None = None,
+             workers: int | None = None):
+    """Generate synthetic samples into a numbered dataset folder."""
     sample_mode, names_dir = _preflight_generation(
         count,
         names_version,
@@ -719,7 +696,10 @@ def generate(count: int, dataset=None, seed: int = config.RANDOM_SEED,
 
             return (i, file_name, label, split, field_type, font_used, format_profile, format_id)
 
-        workers = 1 if count <= 20 else max(1, min(os.cpu_count() or 4, 14))
+        if workers is not None and workers > 0:
+            workers = max(1, min(workers, (os.cpu_count() or 16) * 2))
+        else:
+            workers = 1 if count <= 20 else max(1, os.cpu_count() or 4)
         manifest_path = staging_dir / "manifest.csv"
         labels_path = staging_dir / "labels.csv"
         format_source_path = staging_dir / ".evaluation-source.csv"
