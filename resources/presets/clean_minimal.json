@@ -1,0 +1,21 @@
+{
+  "name": "Clean Minimal",
+  "fade": 1.00,
+  "tint": 0.00,
+  "stain": 0.00,
+  "rotate": 0.0,
+  "blur": 0.0,
+  "noise": 0.0,
+  "texture": 0.0,
+  "scanline": 0.0,
+  "jpeg": 100.0,
+  "crop_top": 0,
+  "crop_bottom": 0,
+  "crop_left": 0,
+  "crop_right": 0,
+  "contrast": 1.00,
+  "gap_prob": 0.00,
+  "gap_count": 0.0,
+  "scratch": 0.00,
+  "erode": 0.00
+}

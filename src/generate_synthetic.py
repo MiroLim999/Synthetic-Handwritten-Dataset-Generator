@@ -80,7 +80,7 @@ from src.split_policy import (EVALUATION_ANNOTATION_COLUMNS,
 EVALUATION_ANNOTATIONS_FILENAME = "evaluation-annotations.csv"
 IMAGE_STATISTICS_FILENAME = "image-statistics.json"
 STATISTICS_SAMPLE_LIMIT = 512
-MAX_SAMPLE_ATTEMPTS = 5
+MAX_SAMPLE_ATTEMPTS = 20
 GENERATOR_SOURCE_FILES = (
     "config.py",
     "src/augment.py",
@@ -272,7 +272,7 @@ def _generate_valid_sample(field_type: str, split: str, file_name: str,
         "semi_broken" if sample_mode.startswith("semi_broken") else "regular"
     )
     failures = []
-    for _attempt in range(1, MAX_SAMPLE_ATTEMPTS + 1):
+    for attempt in range(1, MAX_SAMPLE_ATTEMPTS + 1):
         format_profile = evaluation_policy.format_profile_for_field(
             split, field_type
         )
@@ -291,14 +291,44 @@ def _generate_valid_sample(field_type: str, split: str, file_name: str,
             writer_style=writer_style,
             font_pool=evaluation_policy.fonts_for_split(split),
         )
+        current_semi_params = dict(semi_broken_params) if semi_broken_params else {}
+        current_aug_profile = augmentation_profile
+
+        # Length-aware safeguard for short labels (1-3 chars) like age, sex, character
+        if len(label.strip()) <= 3:
+            max_gaps = max(1, len(label.strip()) * 3)
+            if "gap_count" in current_semi_params:
+                current_semi_params["gap_count"] = min(current_semi_params["gap_count"], max_gaps)
+            if "erode_prob" in current_semi_params:
+                current_semi_params["erode_prob"] = min(current_semi_params.get("erode_prob", 0.5), 0.35)
+
+        # Progressive attempt backoff if stochastic damage wipes out a crop
+        if attempt > 8 and current_semi_params:
+            scale = max(0.1, 1.0 - ((attempt - 8) * 0.1))
+            if "gap_count" in current_semi_params:
+                current_semi_params["gap_count"] = max(1, int(current_semi_params["gap_count"] * scale))
+            if "erode_prob" in current_semi_params:
+                current_semi_params["erode_prob"] = current_semi_params["erode_prob"] * scale
+            if "gap_prob" in current_semi_params:
+                current_semi_params["gap_prob"] = current_semi_params["gap_prob"] * scale
+
+        # Fail-safe recovery for extreme attempts (>15): use safe parameters so massive jobs never crash
+        if attempt > 15:
+            current_damage_profile = "regular"
+            current_semi_params = None
+            current_edge_clipping = "none"
+        else:
+            current_damage_profile = damage_profile
+            current_edge_clipping = edge_clipping
+
         image = degrade(
             image,
-            damage_profile=damage_profile,
+            damage_profile=current_damage_profile,
             rng=rng,
             np_rng=np_rng,
-            augmentation_profile=augmentation_profile,
-            edge_clipping=edge_clipping,
-            semi_broken_params=semi_broken_params,
+            augmentation_profile=current_aug_profile,
+            edge_clipping=current_edge_clipping,
+            semi_broken_params=current_semi_params if current_semi_params else None,
         )
         image = evaluation_policy.apply_degradation_holdout(
             image, split, sample_key=file_name
@@ -476,7 +506,9 @@ def generate(count: int, dataset=None, seed: int = config.RANDOM_SEED,
              augmentation_profile=DEFAULT_AUGMENTATION_PROFILE_ID,
              samples_per_writer: int = 32,
              edge_clipping: str | tuple[float, float, float, float] = "none",
-             semi_broken_params: dict | None = None):
+             semi_broken_params: dict | None = None,
+             custom_field_weights: dict[str, int] | None = None,
+             custom_split_fractions: tuple[float, float, float] | None = None):
     """
     Generate `count` synthetic samples into a numbered dataset folder.
 
@@ -576,11 +608,15 @@ def generate(count: int, dataset=None, seed: int = config.RANDOM_SEED,
         print(f"  fonts  : {font_info}")
         print()
 
-        split_counts = config.allocate_synthetic_split_counts(count)
+        if custom_split_fractions is not None:
+            split_counts = config.allocate_split_counts(count, custom_split_fractions)
+        else:
+            split_counts = config.allocate_synthetic_split_counts(count)
+        field_weights = custom_field_weights if custom_field_weights is not None else _field_weights_for_mode(sample_mode)
         counters = GenerationCounters()
         plan = iter_generation_plan(
             count,
-            _field_weights_for_mode(sample_mode),
+            field_weights,
             split_counts,
             rng,
             split_order=config.SPLIT_NAMES,

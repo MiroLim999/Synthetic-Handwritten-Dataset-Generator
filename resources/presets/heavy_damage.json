@@ -1,0 +1,21 @@
+{
+  "name": "Heavy Ink Damage & Gaps",
+  "fade": 0.45,
+  "tint": 0.25,
+  "stain": 0.60,
+  "rotate": 6.0,
+  "blur": 1.2,
+  "noise": 25.0,
+  "texture": 7.0,
+  "scanline": 15.0,
+  "jpeg": 50.0,
+  "crop_top": 2,
+  "crop_bottom": 2,
+  "crop_left": 2,
+  "crop_right": 2,
+  "contrast": 0.50,
+  "gap_prob": 0.95,
+  "gap_count": 24.0,
+  "scratch": 0.85,
+  "erode": 0.75
+}

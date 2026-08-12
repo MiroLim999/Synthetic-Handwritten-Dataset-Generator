@@ -1,0 +1,56 @@
+Traceback (most recent call last):
+  File "C:\Users\limmi\OneDrive\Desktop\synthetic-generator\gui.py", line 2208, in <module>
+    App().mainloop()
+    ~~~^^
+  File "C:\Users\limmi\OneDrive\Desktop\synthetic-generator\gui.py", line 172, in __init__
+    self._build_ui()
+    ~~~~~~~~~~~~~~^^
+  File "C:\Users\limmi\OneDrive\Desktop\synthetic-generator\gui.py", line 391, in _build_ui
+    self._build_generate_tab(self.tab_generate)
+    ~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\limmi\OneDrive\Desktop\synthetic-generator\gui.py", line 561, in _build_generate_tab
+    self.zip_var.trace_add("write", lambda *args: self._update_preflight_estimates())
+    ^^^^^^^^^^^^
+  File "C:\Users\limmi\AppData\Local\Programs\Python\Python313\Lib\tkinter\__init__.py", line 2546, in __getattr__
+    return getattr(self.tk, attr)
+AttributeError: '_tkinter.tkapp' object has no attribute 'zip_var'
+Traceback (most recent call last):
+  File "C:\Users\limmi\OneDrive\Desktop\synthetic-generator\gui.py", line 2208, in <module>
+    App().mainloop()
+    ~~~^^
+  File "C:\Users\limmi\OneDrive\Desktop\synthetic-generator\gui.py", line 172, in __init__
+    self._build_ui()
+    ~~~~~~~~~~~~~~^^
+  File "C:\Users\limmi\OneDrive\Desktop\synthetic-generator\gui.py", line 391, in _build_ui
+    self._build_generate_tab(self.tab_generate)
+    ~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\limmi\OneDrive\Desktop\synthetic-generator\gui.py", line 561, in _build_generate_tab
+    self.zip_var.trace_add("write", lambda *args: self._update_preflight_estimates())
+    ^^^^^^^^^^^^
+  File "C:\Users\limmi\AppData\Local\Programs\Python\Python313\Lib\tkinter\__init__.py", line 2546, in __getattr__
+    return getattr(self.tk, attr)
+AttributeError: '_tkinter.tkapp' object has no attribute 'zip_var'
+[2026-08-13T00:32:11.316655+08:00] generation worker
+Traceback (most recent call last):
+  File "C:\Users\limmi\OneDrive\Desktop\synthetic-generator\gui.py", line 1987, in _run
+    out_dir = generate(count, dataset=dataset, seed=seed,
+                       names_version=names_version,
+    ...<8 lines>...
+                       custom_field_weights=custom_field_weights,
+                       custom_split_fractions=custom_split_fractions)
+  File "C:\Users\limmi\OneDrive\Desktop\synthetic-generator\src\generate_synthetic.py", line 625, in generate
+     format_id) = _generate_valid_sample(
+                  ~~~~~~~~~~~~~~~~~~~~~~^
+        field_type,
+        ^^^^^^^^^^^
+    ...<12 lines>...
+        semi_broken_params=semi_broken_params,
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "C:\Users\limmi\OneDrive\Desktop\synthetic-generator\src\generate_synthetic.py", line 311, in _generate_valid_sample
+    raise ValueError(
+    ...<2 lines>...
+    )
+ValueError: Could not produce a valid 'age' sample after 5 attempts: nearly blank (0.000000 dark coverage)
+

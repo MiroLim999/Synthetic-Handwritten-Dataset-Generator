@@ -5,6 +5,7 @@ Launch by double-clicking "Generate Images.bat", or run:
     python gui.py
 """
 
+import json
 import os
 import sys
 import time
@@ -16,7 +17,7 @@ import webbrowser
 import tkinter as tk
 from datetime import datetime
 from pathlib import Path
-from tkinter import ttk, messagebox
+from tkinter import ttk, messagebox, simpledialog
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -25,12 +26,15 @@ from PIL import Image, ImageDraw, ImageFont, ImageTk
 import random
 
 import config
+from src import fields
 from src.augment import degrade, EDGE_CLIPPING_RANGES
 from src.generation_profiles import (AUGMENTATION_PROFILES,
                                      create_custom_augmentation_profile,
                                      get_augmentation_profile)
 from src.generate_synthetic import (GenerationCancelled, generate,
                                     guarded_remove_dataset, zip_dataset)
+from src.generation_io import verify_sha256_sidecar
+from src.generation_resources import preflight_generation_resources
 from src.build_splits import build
 from src.render import (CURSIVE_STYLE_GROUPS, fonts_for_style,
                         font_display_name, font_path_for)
@@ -55,6 +59,7 @@ PREVIEW_WIDTH = 460
 SAMPLE_TEXT = "Juan Dela Cruz"
 LOG_DIR = config.ROOT / "logs"
 LOG_FILE = LOG_DIR / "gui.log"
+PRESET_DIR = config.RESOURCES_DIR / "presets"
 MAX_LOG_BYTES = 2 * 1024 * 1024
 LOG_BACKUPS = 3
 
@@ -149,9 +154,24 @@ class App(tk.Tk):
         self._refresh_finalize_scheduled = False
         self._merge_result = None
 
+        self.preview_seed = 42
+        self.preview_text_var = tk.StringVar(value="Juan Dela Cruz")
+        self.preview_field_var = tk.StringVar(value="Auto (Sampled)")
+        self.preview_degraded_var = tk.BooleanVar(value=True)
+
+        self.split_train_var = tk.StringVar(value=str(int(config.SYNTH_TRAIN_FRAC * 100)))
+        self.split_val_var = tk.StringVar(value=str(int(config.SYNTH_VAL_FRAC * 100)))
+        self.split_test_var = tk.StringVar(value=str(int(config.SYNTH_TEST_FRAC * 100)))
+        self.field_weight_vars = {}
+        for ftype in sorted(config.SUPPORTED_FIELD_TYPES):
+            weight = config.FIELD_WEIGHTS.get(ftype, 1)
+            self.field_weight_vars[ftype] = tk.StringVar(value=str(weight))
+        self.preset_var = tk.StringVar(value="")
+
         self._apply_theme()
         self._build_ui()
         self.protocol("WM_DELETE_WINDOW", self._on_close)
+        self._update_preflight_estimates()
         self.after(150, self._update_preview)
         self.after(150, self._refresh_datasets)
         self.after(100, self._poll)
@@ -580,14 +600,89 @@ class App(tk.Tk):
         self.edge_clipping_cb.bind("<<ComboboxSelected>>", self._on_clipping_preset_change)
         self._run_controls.append(self.edge_clipping_cb)
 
+        # ---- Advanced Distribution (Splits & Mix) -----------------------
+        self._section_label(left, "Advanced Distribution (Splits & Mix)")
+        card_dist = self._card(left, pady=(0, 4))
+
+        split_row = ttk.Frame(card_dist, style="Card.TFrame")
+        split_row.pack(fill="x", pady=(0, 6))
+        ttk.Label(split_row, text="Split % (Tr/Val/Te)", style="CardLabel.TLabel", width=14).pack(side="left")
+
+        self.split_train_entry = ttk.Entry(split_row, textvariable=self.split_train_var, width=4)
+        self.split_train_entry.pack(side="left", padx=(0, 4))
+        ttk.Label(split_row, text="/", style="CardHint.TLabel").pack(side="left", padx=(0, 4))
+
+        self.split_val_entry = ttk.Entry(split_row, textvariable=self.split_val_var, width=4)
+        self.split_val_entry.pack(side="left", padx=(0, 4))
+        ttk.Label(split_row, text="/", style="CardHint.TLabel").pack(side="left", padx=(0, 4))
+
+        self.split_test_entry = ttk.Entry(split_row, textvariable=self.split_test_var, width=4)
+        self.split_test_entry.pack(side="left", padx=(0, 8))
+
+        self.split_sum_lbl = ttk.Label(split_row, text="Sum: 100%", style="CardHint.TLabel")
+        self.split_sum_lbl.pack(side="left")
+
+        for entry in (self.split_train_entry, self.split_val_entry, self.split_test_entry):
+            self._run_controls.append(entry)
+            entry.bind("<KeyRelease>", self._update_split_sum_label)
+
+        fw_hdr = ttk.Frame(card_dist, style="Card.TFrame")
+        fw_hdr.pack(fill="x", pady=(6, 4))
+        ttk.Label(fw_hdr, text="Field Type Weights", style="Sub.TLabel").pack(side="left")
+        reset_fw_btn = ttk.Button(fw_hdr, text="🔄 Reset Weights", style="Secondary.TButton", command=self._reset_field_weights)
+        reset_fw_btn.pack(side="right")
+        self._run_controls.append(reset_fw_btn)
+
+        fw_grid = ttk.Frame(card_dist, style="Card.TFrame")
+        fw_grid.pack(fill="x")
+        col_idx = 0
+        row_idx = 0
+        for ftype in sorted(config.SUPPORTED_FIELD_TYPES):
+            cell = ttk.Frame(fw_grid, style="Card.TFrame")
+            cell.grid(row=row_idx, column=col_idx, sticky="w", padx=3, pady=2)
+            ttk.Label(cell, text=f"{ftype}:", style="CardHint.TLabel", width=12).pack(side="left")
+            var = self.field_weight_vars.get(ftype)
+            if var is None:
+                var = tk.StringVar(value=str(config.FIELD_WEIGHTS.get(ftype, 1)))
+                self.field_weight_vars[ftype] = var
+            e = ttk.Entry(cell, textvariable=var, width=4)
+            e.pack(side="left")
+            self._run_controls.append(e)
+
+            col_idx += 1
+            if col_idx >= 2:
+                col_idx = 0
+                row_idx += 1
+
         # ---- Developer Studio (Custom Parameters) -----------------------
         dev_hdr_row = ttk.Frame(left)
         dev_hdr_row.pack(fill="x", pady=(8, 2))
         ttk.Label(dev_hdr_row, text="DEVELOPER STUDIO (CUSTOM PARAMETERS)", style="Section.TLabel").pack(side="left")
+        
+        # Studio Presets Header Bar
+        preset_frame = ttk.Frame(dev_hdr_row)
+        preset_frame.pack(side="right")
+
+        self.preset_cb = ttk.Combobox(preset_frame, textvariable=self.preset_var, state="readonly", width=16)
+        self.preset_cb.pack(side="left", padx=(0, 4))
+        self._refresh_preset_list()
+
+        load_preset_btn = ttk.Button(
+            preset_frame, text="📂 Load", style="Secondary.TButton",
+            command=self._load_selected_preset)
+        load_preset_btn.pack(side="left", padx=(0, 4))
+        self._run_controls.append(load_preset_btn)
+
+        save_preset_btn = ttk.Button(
+            preset_frame, text="💾 Save", style="Secondary.TButton",
+            command=self._save_current_preset)
+        save_preset_btn.pack(side="left", padx=(0, 4))
+        self._run_controls.append(save_preset_btn)
+
         self.reset_btn = ttk.Button(
-            dev_hdr_row, text="🔄 Reset Defaults", style="Secondary.TButton",
+            preset_frame, text="🔄 Reset", style="Secondary.TButton",
             command=self._reset_developer_defaults)
-        self.reset_btn.pack(side="right")
+        self.reset_btn.pack(side="left")
         self._run_controls.append(self.reset_btn)
 
         card_dev = self._card(left, pady=(0, 4))
@@ -706,19 +801,80 @@ class App(tk.Tk):
         self.zip_check.pack(anchor="w")
         self._run_controls.append(self.zip_check)
 
-        # ================= RIGHT: preview + progress ======================
-        self._section_label(right, "Preview")
+        # Trace variables for preflight estimate updates
+        self.count_var.trace_add("write", lambda *args: self._update_preflight_estimates())
+        self.dataset_var.trace_add("write", lambda *args: self._update_preflight_estimates())
+        self.zip_var.trace_add("write", lambda *args: self._update_preflight_estimates())
+
+        # ================= RIGHT: preview + preflight + progress ===========
+        self._section_label(right, "Interactive Live Preview")
         pcard = self._card(right, pady=(0, 4))
+
+        # Controls row above preview canvas
+        pctrl = ttk.Frame(pcard, style="Card.TFrame")
+        pctrl.pack(fill="x", pady=(0, 6))
+
+        ttk.Label(pctrl, text="Field:", style="CardHint.TLabel").pack(side="left", padx=(0, 2))
+        field_options = ["Auto (Sampled)"] + sorted(list(config.SUPPORTED_FIELD_TYPES))
+        self.preview_field_cb = ttk.Combobox(pctrl, textvariable=self.preview_field_var, values=field_options, state="readonly", width=12)
+        self.preview_field_cb.pack(side="left", padx=(0, 6))
+        self.preview_field_cb.bind("<<ComboboxSelected>>", lambda e: self._update_preview())
+        self._run_controls.append(self.preview_field_cb)
+
+        ttk.Label(pctrl, text="Text:", style="CardHint.TLabel").pack(side="left", padx=(0, 2))
+        self.preview_text_entry = ttk.Entry(pctrl, textvariable=self.preview_text_var, width=12)
+        self.preview_text_entry.pack(side="left", padx=(0, 6))
+        self.preview_text_entry.bind("<KeyRelease>", lambda e: self._update_preview())
+        self._run_controls.append(self.preview_text_entry)
+
+        reroll_btn = ttk.Button(pctrl, text="🎲", width=3, style="Quick.TButton", command=self._reroll_preview)
+        reroll_btn.pack(side="left", padx=(0, 6))
+        self._run_controls.append(reroll_btn)
+
+        self.preview_deg_check = ttk.Checkbutton(pctrl, text="Degraded", variable=self.preview_degraded_var, command=self._update_preview)
+        self.preview_deg_check.pack(side="left")
+        self._run_controls.append(self.preview_deg_check)
+
         self.preview_holder = tk.Frame(pcard, bg=PREVIEW_BG,
                                        highlightbackground=BORDER,
                                        highlightthickness=1, bd=0,
-                                       height=280)
+                                       height=260)
         self.preview_holder.pack(fill="both", expand=True)
         self.preview_holder.pack_propagate(False)
         self.preview_label = tk.Label(self.preview_holder, bg=PREVIEW_BG,
                                       text="Loading preview…", fg=SUBTEXT,
                                       font=("Segoe UI", 9))
         self.preview_label.pack(expand=True)
+
+        # Preflight Estimates Card
+        self._section_label(right, "Preflight Estimates")
+        card_est = self._card(right, pady=(0, 4))
+        est_grid = ttk.Frame(card_est, style="Card.TFrame")
+        est_grid.pack(fill="x")
+
+        r1 = ttk.Frame(est_grid, style="Card.TFrame")
+        r1.pack(fill="x", pady=1)
+        ttk.Label(r1, text="💾 Folder Space:", style="CardLabel.TLabel", width=14).pack(side="left")
+        self.est_folder_lbl = ttk.Label(r1, text="Calculating...", style="CardHint.TLabel")
+        self.est_folder_lbl.pack(side="left")
+
+        r2 = ttk.Frame(est_grid, style="Card.TFrame")
+        r2.pack(fill="x", pady=1)
+        ttk.Label(r2, text="📦 Zip Archive:", style="CardLabel.TLabel", width=14).pack(side="left")
+        self.est_zip_lbl = ttk.Label(r2, text="Calculating...", style="CardHint.TLabel")
+        self.est_zip_lbl.pack(side="left")
+
+        r3 = ttk.Frame(est_grid, style="Card.TFrame")
+        r3.pack(fill="x", pady=1)
+        ttk.Label(r3, text="⏱️ Est. Duration:", style="CardLabel.TLabel", width=14).pack(side="left")
+        self.est_time_lbl = ttk.Label(r3, text="Calculating...", style="CardHint.TLabel")
+        self.est_time_lbl.pack(side="left")
+
+        r4 = ttk.Frame(est_grid, style="Card.TFrame")
+        r4.pack(fill="x", pady=1)
+        ttk.Label(r4, text="🔒 Output Target:", style="CardLabel.TLabel", width=14).pack(side="left")
+        self.est_target_lbl = ttk.Label(r4, text="Calculating...", style="CardHint.TLabel")
+        self.est_target_lbl.pack(side="left")
 
         self._section_label(right, "Progress")
         card4 = self._card(right, pady=(0, 8))
@@ -786,6 +942,18 @@ class App(tk.Tk):
             btn_row, text="📂  Open", style="Secondary.TButton",
             command=self._open_selected_dataset)
         self.dataset_open_btn.pack(side="left", padx=(8, 0))
+        self.view_montage_btn = ttk.Button(
+            btn_row, text="🖼️  Montage", style="Secondary.TButton",
+            command=self._view_selected_montage)
+        self.view_montage_btn.pack(side="left", padx=(8, 0))
+        self.view_report_btn = ttk.Button(
+            btn_row, text="📋  Report", style="Secondary.TButton",
+            command=self._view_selected_report)
+        self.view_report_btn.pack(side="left", padx=(8, 0))
+        self.verify_sha_btn = ttk.Button(
+            btn_row, text="🔍  Verify SHA", style="Secondary.TButton",
+            command=self._verify_selected_sha256)
+        self.verify_sha_btn.pack(side="left", padx=(8, 0))
         self.delete_btn = ttk.Button(
             btn_row, text="🗑  Delete", style="Danger.TButton",
             command=self._delete_selected_dataset)
@@ -832,8 +1000,13 @@ class App(tk.Tk):
         if self.specific_font_var.get() not in mapping:
             self.specific_font_var.set("All in group")
 
-    def _make_preview_image(self, pool, lines=3, size=42):
-        """Render SAMPLE_TEXT in a few representative fonts, stacked vertically."""
+    def _reroll_preview(self):
+        self.preview_seed = random.randint(1, 2_147_483_647)
+        self._update_preview()
+
+    def _make_preview_image(self, pool, lines=3, size=42, custom_text=None):
+        """Render text in a few representative fonts, stacked vertically."""
+        text_to_draw = custom_text if custom_text else SAMPLE_TEXT
         fonts = list(pool)
         if not fonts:
             return None
@@ -848,11 +1021,11 @@ class App(tk.Tk):
             except Exception:
                 continue
             measure = ImageDraw.Draw(Image.new("RGB", (1, 1)))
-            box = measure.textbbox((0, 0), SAMPLE_TEXT, font=font)
+            box = measure.textbbox((0, 0), text_to_draw, font=font)
             w, h = box[2] - box[0], box[3] - box[1]
             im = Image.new("RGB", (w + 24, h + 20), PREVIEW_BG)
             d = ImageDraw.Draw(im)
-            d.text((12 - box[0], 10 - box[1]), SAMPLE_TEXT, font=font, fill=(35, 40, 55))
+            d.text((12 - box[0], 10 - box[1]), text_to_draw, font=font, fill=(35, 40, 55))
             if im.width > PREVIEW_WIDTH - 24:
                 r = (PREVIEW_WIDTH - 24) / im.width
                 im = im.resize((PREVIEW_WIDTH - 24, max(1, int(im.height * r))), Image.Resampling.LANCZOS)
@@ -873,20 +1046,43 @@ class App(tk.Tk):
 
     def _update_preview(self, _event=None):
         font_style, cursive_group, specific_font = self._current_font_selection()
+
+        field_sel = getattr(self, "preview_field_var", None)
+        text_sel = getattr(self, "preview_text_var", None)
+        seed = getattr(self, "preview_seed", 42)
+
+        field_type = field_sel.get() if field_sel else "Auto (Sampled)"
+        custom_txt = text_sel.get().strip() if text_sel else ""
+
+        if field_type != "Auto (Sampled)":
+            try:
+                preview_text = fields.make_value(field_type, rng=random.Random(seed))
+            except Exception:
+                preview_text = custom_txt or SAMPLE_TEXT
+        elif custom_txt:
+            preview_text = custom_txt
+        else:
+            preview_text = SAMPLE_TEXT
+
         try:
             if specific_font:
                 fp = font_path_for(specific_font)
                 pool = (fp,) if fp else fonts_for_style(font_style, cursive_group)
-                img = self._make_preview_image(pool, lines=1, size=52)
+                img = self._make_preview_image(pool, lines=1, size=52, custom_text=preview_text)
             else:
                 pool = fonts_for_style(font_style, cursive_group)
-                img = self._make_preview_image(pool, lines=3, size=36)
+                img = self._make_preview_image(pool, lines=3, size=36, custom_text=preview_text)
         except Exception:
             img = None
 
         if img is None:
             self._preview_img = None
             self.preview_label.config(image="", text="(no preview available)")
+            return
+
+        if hasattr(self, "preview_degraded_var") and not self.preview_degraded_var.get():
+            self._preview_img = ImageTk.PhotoImage(img)
+            self.preview_label.config(image=self._preview_img, text="")
             return
 
         profile = self._build_custom_developer_profile()
@@ -901,7 +1097,7 @@ class App(tk.Tk):
                 augmentation_profile=profile,
                 edge_clipping=crop_tuple,
                 semi_broken_params=semi_params,
-                rng=random.Random(42),
+                rng=random.Random(seed),
             )
         except Exception:
             pass
@@ -1055,6 +1251,241 @@ class App(tk.Tk):
 
         self._slider_updating = False
         self._update_preview()
+
+    def _update_preflight_estimates(self, _event=None):
+        if not hasattr(self, "est_folder_lbl"):
+            return
+        try:
+            cnt_str = self.count_var.get().replace(",", "").strip()
+            count = int(cnt_str) if cnt_str.isdigit() else config.DEFAULT_COUNT
+        except Exception:
+            count = config.DEFAULT_COUNT
+
+        create_zip = bool(self.zip_var.get())
+        try:
+            estimate = preflight_generation_resources(
+                config.DATASETS_DIR,
+                count,
+                create_archive=create_zip,
+            )
+            folder_mb = estimate.estimated_bytes / (1024 * 1024)
+            zip_mb = estimate.estimated_archive_bytes / (1024 * 1024)
+            time_sec = max(1, round(count / 350))
+
+            self.est_folder_lbl.config(text=f"~{folder_mb:.1f} MB ({estimate.estimated_image_count:,} imgs)")
+            self.est_zip_lbl.config(text=f"~{zip_mb:.1f} MB" if create_zip else "Disabled")
+            self.est_time_lbl.config(text=f"~{time_sec}s (~{time_sec/60:.1f}m)" if time_sec >= 60 else f"~{time_sec}s")
+        except Exception:
+            self.est_folder_lbl.config(text="Unknown")
+            self.est_zip_lbl.config(text="Unknown")
+            self.est_time_lbl.config(text="Unknown")
+
+        ds_name = self.dataset_var.get().strip()
+        if not ds_name or ds_name == "(next)":
+            try:
+                target_folder = config.next_dataset_dir().name
+            except Exception:
+                target_folder = "dataset_NNN"
+        else:
+            target_folder = ds_name
+        self.est_target_lbl.config(text=f"dataset/datasets/{target_folder}")
+
+    def _reset_field_weights(self):
+        for ftype, def_w in config.FIELD_WEIGHTS.items():
+            if ftype in self.field_weight_vars:
+                self.field_weight_vars[ftype].set(str(def_w))
+
+    def _update_split_sum_label(self, _event=None):
+        if not hasattr(self, "split_sum_lbl"):
+            return
+        try:
+            tr = float(self.split_train_var.get())
+            val = float(self.split_val_var.get())
+            te = float(self.split_test_var.get())
+            total = tr + val + te
+            if abs(total - 100.0) < 0.01:
+                self.split_sum_lbl.config(text=f"Sum: {int(total)}%", foreground=SUBTEXT)
+            else:
+                self.split_sum_lbl.config(text=f"Sum: {total:.0f}% (Must be 100%)", foreground=ERROR_C)
+        except ValueError:
+            self.split_sum_lbl.config(text="Invalid numbers", foreground=ERROR_C)
+
+    def _refresh_preset_list(self):
+        PRESET_DIR.mkdir(parents=True, exist_ok=True)
+        files = sorted(PRESET_DIR.glob("*.json"))
+        names = [f.stem for f in files]
+        if hasattr(self, "preset_cb"):
+            self.preset_cb.config(values=names)
+            if names and not self.preset_var.get():
+                self.preset_var.set(names[0])
+
+    def _load_selected_preset(self):
+        name = self.preset_var.get()
+        if not name:
+            return
+        preset_file = PRESET_DIR / f"{name}.json"
+        if not preset_file.is_file():
+            messagebox.showerror("Error", f"Preset file not found: {preset_file}")
+            return
+        try:
+            with open(preset_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            self._slider_updating = True
+            for k, var in self.dev_sliders.items():
+                if k in data:
+                    val = float(data[k])
+                    var.set(val)
+                    unit = "°" if k == "rotate" else ("px" if k == "blur" else ("%" if "crop" in k else ""))
+                    res = 1.0 if k in ("noise", "scanline", "jpeg", "gap_count") or "crop" in k else 0.01
+                    self.dev_labels[k].set(f"{val:.2f}{unit}" if res < 1.0 else f"{int(val)}{unit}")
+            self._slider_updating = False
+            self.degradation_var.set(config.DEGRADATION_PROFILES["custom_dev_v1"])
+            self._update_preview()
+            self.status.config(text=f"Loaded preset: {name}", foreground=SUCCESS)
+        except Exception as exc:
+            messagebox.showerror("Error loading preset", str(exc))
+
+    def _save_current_preset(self):
+        name = simpledialog.askstring("Save Preset", "Enter a name for this Developer Studio preset:")
+        if not name or not name.strip():
+            return
+        safe_name = name.strip().replace(" ", "_").lower()
+        PRESET_DIR.mkdir(parents=True, exist_ok=True)
+        preset_file = PRESET_DIR / f"{safe_name}.json"
+
+        data = {"name": name.strip()}
+        for k, var in self.dev_sliders.items():
+            data[k] = var.get()
+
+        try:
+            with open(preset_file, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2)
+            self._refresh_preset_list()
+            self.preset_var.set(safe_name)
+            self.status.config(text=f"Saved preset: {safe_name}", foreground=SUCCESS)
+        except Exception as exc:
+            messagebox.showerror("Error saving preset", str(exc))
+
+    def _get_selected_dataset_folder(self):
+        selected = self.tree.selection()
+        if not selected:
+            return None
+        return self._dataset_paths.get(selected[0])
+
+    def _view_selected_montage(self):
+        folder = self._get_selected_dataset_folder()
+        if not folder or not folder.is_dir():
+            messagebox.showwarning("No selection", "Please select a generated dataset from the list.")
+            return
+        montage_path = folder / "review-montage.jpg"
+        if not montage_path.is_file():
+            messagebox.showerror("Missing Montage", f"Review montage does not exist for {folder.name}:\n{montage_path}")
+            return
+
+        win = tk.Toplevel(self)
+        win.title(f"Review Montage — {folder.name}")
+        win.geometry("820x640")
+        win.configure(bg=BG)
+
+        try:
+            pil_img = Image.open(montage_path)
+            pil_img.thumbnail((800, 580), Image.Resampling.LANCZOS)
+            tk_img = ImageTk.PhotoImage(pil_img)
+            lbl = tk.Label(win, image=tk_img, bg=BG)
+            lbl.image = tk_img
+            lbl.pack(expand=True, fill="both", padx=10, pady=10)
+        except Exception as exc:
+            messagebox.showerror("Error displaying montage", str(exc))
+            win.destroy()
+
+    def _view_selected_report(self):
+        folder = self._get_selected_dataset_folder()
+        if not folder or not folder.is_dir():
+            messagebox.showwarning("No selection", "Please select a generated dataset from the list.")
+            return
+        report_path = folder / "dataset-validation.json"
+        if not report_path.is_file():
+            messagebox.showerror("Missing Report", f"Validation report does not exist for {folder.name}:\n{report_path}")
+            return
+
+        try:
+            with open(report_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception as exc:
+            messagebox.showerror("Error reading report", str(exc))
+            return
+
+        win = tk.Toplevel(self)
+        win.title(f"Validation Report — {folder.name}")
+        win.geometry("640x520")
+        win.configure(bg=BG)
+
+        hdr_frame = tk.Frame(win, bg=SURFACE, bd=1, relief="solid")
+        hdr_frame.pack(fill="x", padx=12, pady=12)
+
+        valid = data.get("valid", False)
+        status_text = "✅ VALID DATASET" if valid else "❌ INVALID DATASET"
+        status_color = SUCCESS if valid else ERROR_C
+
+        tk.Label(hdr_frame, text=status_text, font=("Segoe UI", 12, "bold"), fg=status_color, bg=SURFACE).pack(anchor="w", padx=10, pady=(8, 4))
+
+        stats = data.get("statistics", {})
+        info_txt = (
+            f"Images: {stats.get('images', 0):,}  |  "
+            f"Manifest Rows: {stats.get('manifest_rows', 0):,}\n"
+            f"Validated At: {data.get('validated_at', 'Unknown')}\n"
+            f"Manifest SHA-256: {data.get('manifest_sha256', '—')[:16]}…"
+        )
+        tk.Label(hdr_frame, text=info_txt, font=("Segoe UI", 9), fg=TEXT, bg=SURFACE, justify="left").pack(anchor="w", padx=10, pady=(0, 8))
+
+        text_wrap = tk.Frame(win, bg=BG)
+        text_wrap.pack(fill="both", expand=True, padx=12, pady=(0, 12))
+
+        stext = tk.Text(text_wrap, wrap="word", font=("Consolas", 9), bg=SURFACE, fg=TEXT, bd=1, relief="solid")
+        vsb = ttk.Scrollbar(text_wrap, orient="vertical", command=stext.yview)
+        stext.configure(yscrollcommand=vsb.set)
+        stext.pack(side="left", fill="both", expand=True)
+        vsb.pack(side="right", fill="y")
+
+        stext.insert("end", "=== VALIDATION DIAGNOSTICS & METRICS ===\n\n")
+        stext.insert("end", f"Errors ({len(data.get('errors', []))}):\n")
+        for err in data.get("errors", []):
+            stext.insert("end", f"  • {err}\n")
+        if not data.get("errors"):
+            stext.insert("end", "  (None)\n")
+
+        stext.insert("end", f"\nWarnings ({len(data.get('warnings', []))}):\n")
+        for warn in data.get("warnings", []):
+            stext.insert("end", f"  • {warn}\n")
+        if not data.get("warnings"):
+            stext.insert("end", "  (None)\n")
+
+        stext.insert("end", "\nFull Report JSON:\n")
+        stext.insert("end", json.dumps(data, indent=2))
+        stext.config(state="disabled")
+
+    def _verify_selected_sha256(self):
+        folder = self._get_selected_dataset_folder()
+        if not folder or not folder.is_dir():
+            messagebox.showwarning("No selection", "Please select a generated dataset from the list.")
+            return
+        zip_path = self._zip_for(folder)
+        checksum_path = self._checksum_for(folder)
+        if not zip_path.is_file():
+            messagebox.showinfo("No Archive", f"No .zip archive exists for {folder.name}.")
+            return
+        if not checksum_path.is_file():
+            messagebox.showwarning("Missing Checksum", f"Checksum sidecar .sha256 is missing for {folder.name}.")
+            return
+
+        try:
+            valid = verify_sha256_sidecar(zip_path, checksum_path)
+            if valid:
+                messagebox.showinfo("Checksum Verification", f"✅ SUCCESS!\n\nThe archive SHA-256 hash matches the .sha256 sidecar file.\n\nArchive: {zip_path.name}")
+            else:
+                messagebox.showerror("Checksum Verification", f"❌ FAILED!\n\nThe archive SHA-256 hash does NOT match the sidecar!\n\nArchive: {zip_path.name}")
+        except Exception as exc:
+            messagebox.showerror("Verification Error", str(exc))
 
     def _on_font_style_change(self, _event=None):
         if self.font_style_var.get() == "Cursive only":
@@ -1485,6 +1916,39 @@ class App(tk.Tk):
         merge_real = bool(self.real_var.get())
         package_zip = bool(self.zip_var.get())
 
+        # Extract custom split fractions
+        custom_split_fractions = None
+        if hasattr(self, "split_train_var"):
+            try:
+                tr_pct = float(self.split_train_var.get())
+                val_pct = float(self.split_val_var.get())
+                te_pct = float(self.split_test_var.get())
+                total_pct = tr_pct + val_pct + te_pct
+                if abs(total_pct - 100.0) > 0.01 or tr_pct < 0 or val_pct < 0 or te_pct < 0:
+                    messagebox.showerror("Invalid split ratios", "Train, Val, and Test split percentages must be non-negative and sum to 100%.")
+                    return
+                custom_split_fractions = (tr_pct / 100.0, val_pct / 100.0, te_pct / 100.0)
+            except ValueError:
+                messagebox.showerror("Invalid split ratios", "Split ratios must be valid numbers.")
+                return
+
+        # Extract custom field weights
+        custom_field_weights = None
+        if hasattr(self, "field_weight_vars") and self.field_weight_vars:
+            try:
+                custom_field_weights = {}
+                for ftype, var in self.field_weight_vars.items():
+                    w = int(var.get())
+                    if w < 0:
+                        raise ValueError(f"Weight for {ftype} cannot be negative.")
+                    custom_field_weights[ftype] = w
+                if not any(v > 0 for v in custom_field_weights.values()):
+                    messagebox.showerror("Invalid field weights", "At least one field weight must be greater than zero.")
+                    return
+            except ValueError as exc:
+                messagebox.showerror("Invalid field weights", f"Field weights must be non-negative integers: {exc}")
+                return
+
         self.cancel_event.clear()
         self._pending_terminal = None
         self._set_job_active(True)
@@ -1500,7 +1964,8 @@ class App(tk.Tk):
             args=(count, dataset, seed, names_version, sample_mode,
                   font_style, cursive_group, specific_font,
                   merge_real, package_zip, self.cancel_event,
-                  augmentation_profile, edge_clipping, semi_broken_params),
+                  augmentation_profile, edge_clipping, semi_broken_params,
+                  custom_field_weights, custom_split_fractions),
             daemon=False)
         self.worker.start()
 
@@ -1512,7 +1977,9 @@ class App(tk.Tk):
              merge_real, package_zip, cancel_event,
              augmentation_profile=config.DEFAULT_DEGRADATION_PROFILE,
              edge_clipping=config.DEFAULT_EDGE_CLIPPING,
-             semi_broken_params=None):
+             semi_broken_params=None,
+             custom_field_weights=None,
+             custom_split_fractions=None):
         try:
             def cb(done, total, field_type):
                 self.q.put(("progress", done, total, field_type))
@@ -1526,7 +1993,9 @@ class App(tk.Tk):
                                archive_planned=package_zip,
                                augmentation_profile=augmentation_profile,
                                edge_clipping=edge_clipping,
-                               semi_broken_params=semi_broken_params)
+                               semi_broken_params=semi_broken_params,
+                               custom_field_weights=custom_field_weights,
+                               custom_split_fractions=custom_split_fractions)
             if cancel_event.is_set():
                 self.q.put(("cancelled", "Generation cancelled safely."))
                 return

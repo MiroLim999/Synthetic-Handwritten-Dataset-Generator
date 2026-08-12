@@ -48,6 +48,7 @@ class GenerationProfileTests(unittest.TestCase):
             get_augmentation_profile("missing")
 
     def test_font_objects_are_cached_by_normalized_path_and_size(self):
+        render.clear_font_cache()
         fallback = ImageFont.load_default()
         with mock.patch.object(render.ImageFont, "truetype", return_value=fallback) as load:
             first = render.load_font("fake-font.ttf", 42)

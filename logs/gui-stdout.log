@@ -56,3 +56,42 @@ Field distribution:
   civil_status   3
   age            2
   cause_of_death 2
+Generating 5,000 synthetic samples
+  output : C:\Users\limmi\OneDrive\Desktop\synthetic-generator\dataset\datasets\dataset_016
+  splits : train, val, test
+  names  : name1
+  seed   : 42
+  mode   : Regular mixed fields
+  fonts  : 3 fonts  (style: cursive / Loose informal)
+
+
+Generated 5,000 samples -> C:\Users\limmi\OneDrive\Desktop\synthetic-generator\dataset\datasets\dataset_016
+Manifest: C:\Users\limmi\OneDrive\Desktop\synthetic-generator\dataset\datasets\dataset_016\manifest.csv
+
+Split distribution:
+  train  4000
+  val    500
+  test   500
+
+Field distribution:
+  full_name      1523
+  place          766
+  date_written   638
+  date_numeric   532
+  cause_of_death 422
+  age            237
+  civil_status   232
+  sex            205
+  religion       135
+  citizenship    131
+  occupation     92
+  character      46
+  numeric        41
+Generating 1,000 synthetic samples
+  output : C:\Users\limmi\OneDrive\Desktop\synthetic-generator\dataset\datasets\dataset_017
+  splits : train, val, test
+  names  : name1
+  seed   : 43
+  mode   : Semi-broken: mixed
+  fonts  : 3 fonts  (style: cursive / Loose informal)
+
