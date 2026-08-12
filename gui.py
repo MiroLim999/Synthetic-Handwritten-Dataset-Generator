@@ -241,6 +241,18 @@ class App(tk.Tk):
                         darkcolor=ACCENT,
                         thickness=8)
 
+        # High-contrast sliders
+        style.configure("Horizontal.TScale",
+                        troughcolor="#dbe1f2",
+                        background=ACCENT,
+                        bordercolor=ACCENT,
+                        lightcolor=ACCENT,
+                        darkcolor=ACCENT,
+                        thickness=14)
+        style.map("Horizontal.TScale",
+                  background=[("active", ACCENT_H), ("pressed", "#3730a3")],
+                  troughcolor=[("active", "#cbd5e1")])
+
         # Notebook (tabs)
         style.configure("TNotebook", background=BG, borderwidth=0, tabmargins=(6, 6, 6, 0))
         style.configure("TNotebook.Tab",
