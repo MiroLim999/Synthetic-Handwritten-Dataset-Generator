@@ -112,7 +112,10 @@ class BuildSplitsSecurityTests(unittest.TestCase):
 
         result = build_splits.build("dataset_001")
 
-        self.assertEqual(result.out_dir, self.out_dir)
+        self.assertEqual(
+            result.out_dir.resolve(strict=False),
+            self.out_dir.resolve(strict=False),
+        )
         self.assertEqual(result.copied, len(rows))
         with (self.out_dir / "manifest.csv").open(newline="", encoding="utf-8") as file:
             reader = csv.DictReader(file)

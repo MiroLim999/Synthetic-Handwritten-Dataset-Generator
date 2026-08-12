@@ -1303,7 +1303,10 @@ class App(tk.Tk):
             folder = config.assert_safe_dataset_dir(folder)
             expected_zip = self._validated_dataset_sidecar(folder, ".zip")
             expected_checksum = self._validated_dataset_sidecar(folder, ".zip.sha256")
-            if zip_path != expected_zip or checksum_path != expected_checksum:
+            if (
+                Path(zip_path).resolve(strict=False) != expected_zip
+                or Path(checksum_path).resolve(strict=False) != expected_checksum
+            ):
                 raise ValueError("Dataset deletion targets changed before deletion")
             self.q.put(("delete_status", f"Deleting {folder.name} folder…"))
             removed_folder = guarded_remove_dataset(folder)

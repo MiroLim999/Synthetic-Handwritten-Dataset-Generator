@@ -293,7 +293,8 @@ class RealMergeIntegrationTests(unittest.TestCase):
             destination = Path(destination)
             source = Path(source)
             if (
-                destination == self.out_dir / "manifest.csv"
+                destination.resolve(strict=False)
+                == (self.out_dir / "manifest.csv").resolve(strict=False)
                 and source.parent.name == "metadata"
             ):
                 raise OSError("injected manifest commit failure")
