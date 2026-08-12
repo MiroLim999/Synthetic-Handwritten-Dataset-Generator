@@ -10,6 +10,6 @@ pillow==12.3.0
 tqdm==4.68.3
 
 Faker==37.5.3
-mypy==1.17.1
+mypy==2.3.0
 pip-audit==2.9.0
 ruff==0.12.11
