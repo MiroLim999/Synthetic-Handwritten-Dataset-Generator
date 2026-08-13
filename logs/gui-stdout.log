@@ -189,3 +189,65 @@ Generating 40,000 synthetic samples
   mode   : Regular mixed fields
   fonts  : 24 fonts  (style: all)
 
+Generating 5,000 synthetic samples
+  output : C:\Users\limmi\OneDrive\Desktop\synthetic-generator\dataset\datasets\dataset_024
+  splits : train, val, test
+  names  : name1
+  seed   : 42
+  mode   : Regular mixed fields
+  fonts  : 24 fonts  (style: all)
+
+
+Generated 5,000 samples -> C:\Users\limmi\OneDrive\Desktop\synthetic-generator\dataset\datasets\dataset_024
+Manifest: C:\Users\limmi\OneDrive\Desktop\synthetic-generator\dataset\datasets\dataset_024\manifest.csv
+
+Split distribution:
+  train  4000
+  val    500
+  test   500
+
+Field distribution:
+  full_name      1476
+  place          760
+  date_written   649
+  date_numeric   534
+  cause_of_death 410
+  civil_status   263
+  age            232
+  sex            210
+  citizenship    140
+  religion       129
+  occupation     103
+  character      48
+  numeric        46
+Generating 5,000 synthetic samples
+  output : C:\Users\limmi\OneDrive\Desktop\synthetic-generator\dataset\datasets\dataset_025
+  splits : train, val, test
+  names  : name1
+  seed   : 467
+  mode   : Regular mixed fields
+  fonts  : 24 fonts  (style: all)
+
+
+Generated 5,000 samples -> C:\Users\limmi\OneDrive\Desktop\synthetic-generator\dataset\datasets\dataset_025
+Manifest: C:\Users\limmi\OneDrive\Desktop\synthetic-generator\dataset\datasets\dataset_025\manifest.csv
+
+Split distribution:
+  train  4000
+  val    500
+  test   500
+
+Field distribution:
+  full_name      1465
+  place          811
+  date_written   628
+  date_numeric   517
+  cause_of_death 378
+  age            278
+  civil_status   244
+  sex            196
+  religion       146
+  citizenship    123
+  occupation     109
+  character      61
+  numeric        44

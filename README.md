@@ -52,6 +52,34 @@ python -c "from src.render import available_fonts; print(*available_fonts(), sep
 
 ---
 
+## 🤖 Agentic AI Setup Instructions (Gemini Antigravity, Kiro AI, Cursor AI)
+
+If you are using an Agentic AI coding assistant (such as **Google Gemini Antigravity**, **Kiro AI IDE**, **Cursor AI**, **Windsurf**, or **VS Code Copilot Workspace**), you can copy-paste the instructions below directly into your AI prompt window or agent prompt to let the AI set up, test, or generate datasets autonomously.
+
+### 📋 Copy-Paste Prompt for AI Agents:
+
+```text
+Please set up and run the Synthetic Handwriting Dataset Generator repository:
+1. Environment Setup: Create a Python virtual environment (`.venv`), activate it, upgrade pip, and install all dependencies from `requirements.txt`.
+2. Health Check: Run `python -m unittest discover -s tests -v` to ensure all 175 unit tests pass cleanly.
+3. Dataset Generation: Run the synthetic generator to produce a dataset (e.g. `python -m src.generate_synthetic --count 1000 --seed 42`).
+4. Verification: Verify that `manifest.csv`, `dataset-validation.json`, and images are present in the output folder under `dataset/datasets/`.
+```
+
+### 💻 One-Liner Execution for AI Terminal Tools:
+
+**Windows PowerShell:**
+```powershell
+python -m venv .venv; .\.venv\Scripts\Activate.ps1; python -m pip install --upgrade pip; python -m pip install -r requirements.txt; python -m unittest discover -s tests -v; python gui.py
+```
+
+**Linux / macOS:**
+```bash
+python3 -m venv .venv && source .venv/bin/activate && python -m pip install --upgrade pip && python -m pip install -r requirements.txt && python -m unittest discover -s tests -v && python gui.py
+```
+
+---
+
 ## Launch Desktop GUI
 
 Launch the responsive desktop GUI using:
