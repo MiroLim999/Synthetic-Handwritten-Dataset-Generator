@@ -64,6 +64,7 @@ DEFAULT_SAMPLE_MODE = "regular"
 
 DEGRADATION_PROFILES = {
     "historical_scan_v1": "Historical scan (default)",
+    "historical_1914_ledger": "1914 Historical Book Record",
     "faded_ink": "Faded ink & paper tint",
     "bleed_through": "Bleed-through & paper texture",
     "scan_noise": "Scan noise & scanner lines",

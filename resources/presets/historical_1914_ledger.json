@@ -1,0 +1,21 @@
+{
+  "name": "1914 Historical Book Record",
+  "fade": 0.58,
+  "tint": 0.22,
+  "stain": 0.45,
+  "rotate": 3.5,
+  "blur": 0.6,
+  "noise": 16.0,
+  "texture": 4.5,
+  "scanline": 10.0,
+  "jpeg": 70.0,
+  "crop_top": 0,
+  "crop_bottom": 0,
+  "crop_left": 0,
+  "crop_right": 0,
+  "contrast": 0.72,
+  "gap_prob": 0.85,
+  "gap_count": 16.0,
+  "scratch": 0.60,
+  "erode": 0.50
+}
