@@ -820,76 +820,76 @@ Affected files: `tests/test_range_model.py` (new), `tests/test_studio_state.py` 
 
 Affected files: `src/sample_pipeline.py` (new), `src/generate_synthetic.py`
 
-- [ ] Move one attempt (value, render, degrade, test-split holdout, quality check)
+- [x] Move one attempt (value, render, degrade, test-split holdout, quality check)
       into `attempt_sample(...) -> SampleAttempt`. `_generate_valid_sample` loops
       over it.
-- [ ] RNG use stays exactly the same (confirmed by the golden check).
+- [x] RNG use stays exactly the same (confirmed by the golden check).
 
 ## S6.2 Preview of the actual run
 
 Affected files: `src/preview.py` (new)
 
-- [ ] `preview_samples(settings, recipe, *, count, seed, n, offset=0, split=None)`
+- [x] `preview_samples(settings, recipe, *, count, seed, n, offset=0, split=None)`
       reproduces the first N items of the run plan: the same field and split
       choices, writer IDs, item seeds, font pools, and retries. Each tile is
       identical to the image generation would write.
-- [ ] The optional split filter walks the plan to show the test-split look.
-- [ ] When the Seed field is blank, the preview uses a temporary seed and labels the
+- [x] The optional split filter walks the plan to show the test-split look.
+- [x] When the Seed field is blank, the preview uses a temporary seed and labels the
       grid "example; the run will pick its own seed".
 
 ## S6.3 Preview grid
 
 Affected files: `gui_studio.py`
 
-- [ ] 6, 9, or 12 tiles, shown at true scale (only ever scaled down).
-- [ ] Badges: field, font, cut sides, "kept on attempt k", and the file the tile will
+- [x] 6, 9, or 12 tiles, shown at true scale (only ever scaled down).
+- [x] Badges: field, font, cut sides, "kept on attempt k", and the file the tile will
       become (for example `train/syn_000003.png`).
-- [ ] Controls: split filter, "Next N" (offset), and a seed shared with the Generate
+- [x] Controls: split filter, "Next N" (offset), and a seed shared with the Generate
       tab.
 
 ## S6.4 Background rendering
 
 Affected files: `gui_studio.py`
 
-- [ ] Wait 150 ms after the last change, then render on a worker thread from a
+- [x] Wait 150 ms after the last change, then render on a worker thread from a
       plain-data snapshot.
-- [ ] Results come back through the queue with a generation token; stale results
+- [x] Results come back through the queue with a generation token; stale results
       are dropped.
-- [ ] Failures show an error tile instead of being silently swallowed.
+- [x] Failures show an error tile instead of being silently swallowed.
 
 ## S6.5 Retry estimate
 
 Affected files: `src/preview.py`, `gui.py`
 
-- [ ] Run 48 single attempts in the background and show "about x% would be retried
+- [x] Run 48 single attempts in the background and show "about x% would be retried
       (edge ink y%, blank z%, low contrast w%)" plus mean attempts per sample.
-- [ ] Multiply the duration estimate by the mean attempts.
+- [x] Multiply the duration estimate by the mean attempts.
 
 ## S6.6 Compare with real scans
 
 Affected files: `gui_studio.py`
 
-- [ ] When `dataset/real/images` has images, compare 64 real images against 64
+- [x] When `dataset/real/images` has images, compare 64 real images against 64
       preview samples using `compare_image_statistics`.
-- [ ] Show standardized differences with arrows and plain hints (for example
+- [x] Show standardized differences with arrows and plain hints (for example
       "synthetic is darker: -1.2 sd").
-- [ ] Without real images, the panel is disabled and explains why.
+- [x] Without real images, the panel is disabled and explains why.
 
 ## S6.7 Tests
 
 Affected files: `tests/test_preview_pipeline.py` (new)
 
-- [ ] Preview tiles match the generated images pixel for pixel, for the same seed,
+- [x] Preview tiles match the generated images pixel for pixel, for the same seed,
       count, and settings, both for the first N and at an offset.
-- [ ] The split filter is deterministic.
-- [ ] Results with a stale token are discarded (fake `after` and queue).
-- [ ] Retry statistics are deterministic.
-- [ ] Comparison logic works against a temporary real-image folder.
+- [x] The split filter is deterministic.
+- [x] Results with a stale token are discarded (fake `after` and queue).
+- [x] Retry statistics are deterministic.
+- [x] Comparison logic works against a temporary real-image folder.
 
 ### S6 verification gate
 
-- [ ] Gate commands pass, with the golden hashes unchanged.
-- [ ] Manual check: dragging controls stays smooth, and after generating with the
+- [x] Gate commands pass, with the golden hashes unchanged.
+- [x] Manual check: dragging controls stays smooth, and after generating with the
       same seed and count, the files named on the tiles match the tiles.
 
 ---
