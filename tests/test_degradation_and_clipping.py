@@ -65,17 +65,18 @@ class TestDegradationAndClipping(unittest.TestCase):
 
     def test_create_custom_augmentation_profile(self):
         from src.generation_profiles import create_custom_augmentation_profile
-        custom_prof = create_custom_augmentation_profile(
-            fade_contrast=0.40,
-            paper_tint_alpha=0.25,
-            stain_prob=0.80,
-            rotate_deg=8.0,
-            blur_radius=1.5,
-            noise_std=25.0,
-            paper_texture_std=8.0,
-            scanline_alpha=18,
-            jpeg_quality=50,
-        )
+        with self.assertWarns(DeprecationWarning):
+            custom_prof = create_custom_augmentation_profile(
+                fade_contrast=0.40,
+                paper_tint_alpha=0.25,
+                stain_prob=0.80,
+                rotate_deg=8.0,
+                blur_radius=1.5,
+                noise_std=25.0,
+                paper_texture_std=8.0,
+                scanline_alpha=18,
+                jpeg_quality=50,
+            )
         self.assertEqual(custom_prof.profile_id, "custom_dev_v1")
         self.assertEqual(custom_prof.stain_probability, 0.80)
         self.assertEqual(custom_prof.rotate_degrees, 8.0)

@@ -11,10 +11,15 @@ future calibration against representative scans.
 from __future__ import annotations
 
 import hashlib
+import json
 import math
 import random
+import warnings
+from collections.abc import Mapping
 from dataclasses import asdict, dataclass
 from numbers import Integral, Real
+
+from src import studio_spec
 
 
 PROFILE_SCHEMA_VERSION = 1
@@ -487,7 +492,19 @@ def create_custom_augmentation_profile(
     jpeg_quality: int = 75,
     profile_id: str = "custom_dev_v1",
 ) -> AugmentationProfile:
-    """Dynamically construct a validated AugmentationProfile from developer UI controls."""
+    """Dynamically construct a validated AugmentationProfile from developer UI controls.
+
+    .. deprecated::
+        Use :func:`augmentation_spec_from_legacy_values` with
+        :func:`augmentation_profile_from_spec`, which give the same values
+        with a content-addressed profile ID.
+    """
+    warnings.warn(
+        "create_custom_augmentation_profile is deprecated; use "
+        "augmentation_profile_from_spec(augmentation_spec_from_legacy_values(...))",
+        DeprecationWarning,
+        stacklevel=2,
+    )
     fade_contrast = max(0.10, min(1.0, float(fade_contrast)))
     paper_tint_alpha = max(0.0, min(0.50, float(paper_tint_alpha)))
     stain_prob = max(0.0, min(1.0, float(stain_prob)))
@@ -520,6 +537,116 @@ def create_custom_augmentation_profile(
         compression_probability=1.0 if jpeg_quality < 100 else 0.0,
         jpeg_quality_range=(jpeg_quality, jpeg_quality),
     )
+
+
+_AUGMENTATION_INTEGER_FIELDS = frozenset({
+    "scanline_alpha_range", "jpeg_quality_range",
+    "stain_count_range", "stain_opacity_range",
+})
+
+
+def canonical_json(values: Mapping) -> str:
+    """Sorted, compact JSON used for content hashes."""
+    return json.dumps(values, sort_keys=True, separators=(",", ":"),
+                      ensure_ascii=True, allow_nan=False)
+
+
+def content_id(prefix: str, values: Mapping) -> str:
+    """``<prefix>_<first 12 hex of sha256(canonical JSON)>``."""
+    digest = hashlib.sha256(canonical_json(values).encode("utf-8")).hexdigest()
+    return f"{prefix}_{digest[:12]}"
+
+
+def _normalized_number(value, integer: bool):
+    if isinstance(value, (tuple, list)):
+        return [_normalized_number(item, integer) for item in value]
+    return int(value) if integer else float(value)
+
+
+def _augmentation_values(fields: Mapping[str, object]) -> dict[str, object]:
+    """Every profile value except the ID, with ints and floats normalized."""
+    return {
+        name: _normalized_number(value, name in _AUGMENTATION_INTEGER_FIELDS)
+        for name, value in fields.items()
+        if name != "profile_id"
+    }
+
+
+def _registered_augmentation_ids() -> dict[str, str]:
+    return {
+        canonical_json(_augmentation_values(asdict(profile))): profile_id
+        for profile_id, profile in AUGMENTATION_PROFILES.items()
+    }
+
+
+def augmentation_profile_id(fields: Mapping[str, object]) -> str:
+    """Registered ID when the values match a built-in, else a content ID."""
+    values = _augmentation_values(fields)
+    registered = _registered_augmentation_ids().get(canonical_json(values))
+    return registered or content_id("custom", values)
+
+
+def augmentation_profile_from_spec(spec: Mapping) -> AugmentationProfile:
+    """Build a profile from a studio ``augmentation`` section.
+
+    Missing params take the spec defaults; invalid or unknown values raise
+    ``ValueError``.  The ID is content-addressed (or a built-in's ID when the
+    values match it exactly).
+    """
+    data = studio_spec.require_valid_section("augmentation", spec)
+    fields = studio_spec.section_fields("augmentation", data)
+    return AugmentationProfile(profile_id=augmentation_profile_id(fields), **fields)
+
+
+def augmentation_spec_from_profile(
+        profile: str | AugmentationProfile) -> dict:
+    """The complete studio ``augmentation`` section for a profile."""
+    profile = get_augmentation_profile(profile)
+    return studio_spec.section_from_fields("augmentation", asdict(profile))
+
+
+def augmentation_spec_from_legacy_values(
+    *,
+    fade_contrast: float = 0.65,
+    paper_tint_alpha: float = 0.15,
+    stain_prob: float = 0.35,
+    rotate_deg: float = 4.5,
+    blur_radius: float = 0.8,
+    noise_std: float = 12.0,
+    paper_texture_std: float = 3.5,
+    scanline_alpha: int = 10,
+    jpeg_quality: int = 75,
+) -> dict:
+    """The ``augmentation`` section equivalent to the old single-value sliders.
+
+    Uses the same clamps and on/off rules as
+    :func:`create_custom_augmentation_profile`, so the resulting profile is
+    equal to it field for field (ID aside).
+    """
+    fade = max(0.10, min(1.0, float(fade_contrast)))
+    tint = max(0.0, min(0.50, float(paper_tint_alpha)))
+    stain = max(0.0, min(1.0, float(stain_prob)))
+    rotate = max(0.0, min(15.0, float(rotate_deg)))
+    blur = max(0.0, min(5.0, float(blur_radius)))
+    noise = max(0.0, min(50.0, float(noise_std)))
+    texture = max(0.0, min(20.0, float(paper_texture_std)))
+    scanline = max(0, min(60, int(scanline_alpha)))
+    jpeg = max(10, min(100, int(jpeg_quality)))
+    return {
+        "fade": {"probability": 1.0 if fade < 0.98 else 0.0, "range": [fade, fade]},
+        "brightness": {"probability": 0.0, "range": [1.0, 1.0]},
+        "paper_tint": {"probability": 1.0 if tint > 0 else 0.0, "range": [tint, tint]},
+        "stains": {"probability": stain, "count_range": [2, 6],
+                   "opacity_range": [15, 45]},
+        "rotation": {"probability": 1.0 if rotate > 0 else 0.0, "range": [0.0, rotate]},
+        "blur": {"probability": 1.0 if blur > 0 else 0.0, "range": [blur, blur]},
+        "noise": {"probability": 1.0 if noise > 0 else 0.0, "range": [noise, noise]},
+        "paper_texture": {"probability": 1.0 if texture > 0 else 0.0,
+                          "range": [texture, texture]},
+        "scanlines": {"probability": 1.0 if scanline > 0 else 0.0,
+                      "range": [scanline, scanline]},
+        "jpeg": {"probability": 1.0 if jpeg < 100 else 0.0, "range": [jpeg, jpeg]},
+    }
 
 
 def _style_seed(seed: int, writer_id: str, profile_id: str) -> tuple[int, str]:
