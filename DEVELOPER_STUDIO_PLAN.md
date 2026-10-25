@@ -723,73 +723,73 @@ Affected files: `README.md`
 
 Affected files: `src/studio_recipe.py`
 
-- [ ] Conversion between `StudioState` and `StudioRecipe`.
-- [ ] Dirty tracking against the loaded source (a preset or a base profile), named
+- [x] Conversion between `StudioState` and `StudioRecipe`.
+- [x] Dirty tracking against the loaded source (a preset or a base profile), named
       "custom (based on X)".
 
 ## S5.2 Range widgets
 
 Affected files: `gui_widgets.py` (new)
 
-- [ ] `RangeModel` (pure): clamp, snap, keep min <= max, drag either handle, nudge
+- [x] `RangeModel` (pure): clamp, snap, keep min <= max, drag either handle, nudge
       from the keyboard.
-- [ ] `RangeSlider`: a two-handle `tk.Canvas` with:
+- [x] `RangeSlider`: a two-handle `tk.Canvas` with:
       - keyboard focus per handle
       - arrow keys, with Shift for larger steps
       - double-click to type a value
       - a disabled state
-- [ ] A chance slider that shows a percentage.
+- [x] A chance slider that shows a percentage.
 
 ## S5.3 `StudioPanel`
 
 Affected files: `gui_studio.py` (new)
 
-- [ ] Built from `studio_spec` and grouped as Ink and paper / Geometry / Scanner /
+- [x] Built from `studio_spec` and grouped as Ink and paper / Geometry / Scanner /
       Stroke damage / Character cutoff.
-- [ ] `get_state()` and `set_state()`, a `<<StudioChanged>>` virtual event, and a
+- [x] `get_state()` and `set_state()`, a `<<StudioChanged>>` virtual event, and a
       reset per section.
-- [ ] A base-profile picker that loads exact values; any edit marks the recipe as
+- [x] A base-profile picker that loads exact values; any edit marks the recipe as
       custom.
-- [ ] Stroke damage is enabled only in semi-broken modes, with a hint explaining
+- [x] Stroke damage is enabled only in semi-broken modes, with a hint explaining
       why.
-- [ ] Cutoff offers quick picks (None/Light/Moderate/Heavy), max ink loss, and a
+- [x] Cutoff offers quick picks (None/Light/Moderate/Heavy), max ink loss, and a
       note about short labels.
 
 ## S5.4 Studio tab and Generate tab
 
 Affected files: `gui.py`
 
-- [ ] Add a Studio tab. On the Generate tab, a single summary row ("Recipe:
+- [x] Add a Studio tab. On the Generate tab, a single summary row ("Recipe:
       Historical faded* - based on historical_scan_v1 - [Open Studio]") replaces
       the slider card and the Degradation and Char cutoff dropdowns.
-- [ ] Replace the index-based tab checks (`_on_tab_change`, and the scroll
+- [x] Replace the index-based tab checks (`_on_tab_change`, and the scroll
       handler's `nb.index(...) != 0`) with checks on the tab widget itself. Add
       wheel scrolling to the Studio tab.
-- [ ] Register every studio widget in `_run_controls` so it locks during generation.
+- [x] Register every studio widget in `_run_controls` so it locks during generation.
 
 ## S5.5 Preset bar
 
 Affected files: `gui_studio.py`
 
-- [ ] A list showing built-ins (marked with a lock) and user presets, with chips for
+- [x] A list showing built-ins (marked with a lock) and user presets, with chips for
       the sections each one contains.
-- [ ] Actions:
+- [x] Actions:
       - Load, which warns about unsaved changes
       - Save (user presets only)
       - Save as, with section checkboxes; augmentation, stroke damage, and cutoff
         are checked by default
       - Duplicate, Rename, Delete (with confirmation), Import, Export
-- [ ] A `*` marker whenever the current state differs from the loaded preset.
-- [ ] "Copy CLI command" for a saved preset. With unsaved changes, it asks you to
+- [x] A `*` marker whenever the current state differs from the loaded preset.
+- [x] "Copy CLI command" for a saved preset. With unsaved changes, it asks you to
       save first.
 
 ## S5.6 Reset and cleanup
 
 Affected files: `gui.py`, `config.py`
 
-- [ ] Three resets: per section, "Reset studio", and a separate "Reset all" on the
+- [x] Three resets: per section, "Reset studio", and a separate "Reset all" on the
       Generate tab.
-- [ ] Once nothing uses them, remove `_make_slider`, the midpoint logic in
+- [x] Once nothing uses them, remove `_make_slider`, the midpoint logic in
       `_on_degradation_preset_change`, the defaults dict in
       `_reset_developer_defaults`, and `custom_dev_v1` from
       `config.DEGRADATION_PROFILES`.
@@ -798,16 +798,16 @@ Affected files: `gui.py`, `config.py`
 
 Affected files: `tests/test_range_model.py` (new), `tests/test_studio_state.py` (new)
 
-- [ ] `RangeModel` keeps its invariants.
-- [ ] State <-> recipe round trip, dirty tracking, read-only built-ins, and
+- [x] `RangeModel` keeps its invariants.
+- [x] State <-> recipe round trip, dirty tracking, read-only built-ins, and
       rejection of bad imports.
-- [ ] Tab detection works by widget identity.
-- [ ] Optional: a smoke test with real widgets, skipped when Tk has no display.
+- [x] Tab detection works by widget identity.
+- [x] Optional: a smoke test with real widgets, skipped when Tk has no display.
 
 ### S5 verification gate
 
-- [ ] Gate commands pass, with the golden hashes unchanged.
-- [ ] Manual check:
+- [x] Gate commands pass, with the golden hashes unchanged.
+- [x] Manual check:
       - reach and operate every control with the keyboard alone
       - load, edit, save, export, and import a preset
       - generate a dataset from the Studio tab
