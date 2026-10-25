@@ -392,7 +392,10 @@ def _run_metadata(*, seed: int, count: int, sample_mode: str,
                   generation_started_at: str, resource_estimate,
                   writer_profile, augmentation_profile,
                   counters: GenerationCounters, writer_assigner,
-                  edge_clipping: str = "none") -> dict:
+                  edge_clipping: str = "none",
+                  stroke_damage_params: dict | None = None,
+                  field_weights: dict | None = None,
+                  split_fractions: tuple | None = None) -> dict:
     """Build the complete provenance record written before publication."""
     return {
         "metadata_schema_version": 1,
@@ -415,6 +418,9 @@ def _run_metadata(*, seed: int, count: int, sample_mode: str,
             "specific_font": specific_font,
             "edge_clipping": edge_clipping,
             "font_files": [Path(path).name for path in effective_fonts],
+            "stroke_damage_params": stroke_damage_params,
+            "field_weights": field_weights,
+            "split_fractions": list(split_fractions) if split_fractions else None,
         },
         "preprocessing": {
             "id": PREPROCESSING_ID,
@@ -441,6 +447,24 @@ def _run_metadata(*, seed: int, count: int, sample_mode: str,
         "validation_report": REPORT_FILENAME,
         "real_merge": None,
     }
+
+
+def _effective_stroke_damage_params(sample_mode: str,
+                                    semi_broken_params: dict | None) -> dict | None:
+    """Stroke-damage settings a run actually used (None outside semi-broken)."""
+    if not sample_mode.startswith("semi_broken"):
+        return None
+    params = dict(semi_broken_params or {})
+    effective = {
+        "contrast_prob": params.get("contrast_prob", config.BROKEN_CONTRAST_PROB),
+        "erode_prob": params.get("erode_prob", config.BROKEN_ERODE_PROB),
+        "gap_prob": params.get("gap_prob", config.BROKEN_INK_GAP_PROB),
+        "gap_count": params.get("gap_count"),
+        "scratch_prob": params.get("scratch_prob", config.BROKEN_SCRATCH_PROB),
+    }
+    if effective["gap_count"] is None:
+        effective["gap_count_range"] = list(config.BROKEN_INK_GAP_COUNT)
+    return effective
 
 
 def _write_evaluation_annotations_streaming(
@@ -625,8 +649,10 @@ def generate(count: int, dataset=None, seed: int = config.RANDOM_SEED,
         print()
 
         if custom_split_fractions is not None:
+            split_fractions = tuple(float(v) for v in custom_split_fractions)
             split_counts = config.allocate_split_counts(count, custom_split_fractions)
         else:
+            split_fractions = config.synthetic_split_fractions()
             split_counts = config.allocate_synthetic_split_counts(count)
         field_weights = custom_field_weights if custom_field_weights is not None else field_weights_for_mode(sample_mode)
         counters = GenerationCounters()
@@ -833,6 +859,13 @@ def generate(count: int, dataset=None, seed: int = config.RANDOM_SEED,
                 counters=counters,
                 writer_assigner=writer_assigner,
                 edge_clipping=edge_clipping,
+                stroke_damage_params=_effective_stroke_damage_params(
+                    sample_mode, semi_broken_params),
+                field_weights={
+                    key: value for key, value in sorted(field_weights.items())
+                    if value
+                },
+                split_fractions=split_fractions,
             ),
         )
         _raise_if_cancelled(cancel_event)
