@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import shutil
 import tempfile
 import tkinter as tk
@@ -46,6 +47,17 @@ class StudioStateTests(unittest.TestCase):
         self.assertEqual(base.source_name, "scan_noise")
         self.assertFalse(base.dirty)
         self.assertEqual(base.augmentation_profile(), AUGMENTATION_PROFILES["scan_noise"])
+
+    def test_bypass_is_preview_only(self):
+        state = StudioState.default().with_section(
+            "cutoff", {**studio_spec.default_section("cutoff"),
+                       "top": {"probability": 0.5, "range": [0.03, 0.08]}})
+        bypassed = state.with_bypassed([("augmentation", "blur"), ("cutoff", "*")])
+        self.assertEqual(bypassed.augmentation["blur"]["probability"], 0.0)
+        self.assertEqual(bypassed.augmentation["blur"]["range"], state.augmentation["blur"]["range"])
+        self.assertFalse(bypassed.cutoff_profile().active)
+        self.assertEqual(state.augmentation["blur"]["probability"], 0.65)  # unchanged
+        self.assertNotIn("bypass", json.dumps(state.to_recipe("x").to_dict()))
 
     def test_profiles_and_baseline_recipe(self):
         state = StudioState.default().with_section(

@@ -130,6 +130,19 @@ class PreviewQueueTests(unittest.TestCase):
                          [("studio_preview", 5), ("studio_retry", 5)])
         self.assertEqual(len(kinds[0][2]), 2)
 
+    def test_bypassed_effects_change_only_the_preview_request(self):
+        app = self._app()
+        state = app.studio_state
+        app.studio_panel = mock.Mock()
+        app.studio_panel.bypassed.return_value = (("augmentation", "noise"),)
+        app.studio_panel.preview_state.return_value = state.with_bypassed(
+            [("augmentation", "noise")])
+        request = app._preview_request()
+        self.assertEqual(request["options"]["augmentation_profile"].noise_probability, 0.0)
+        self.assertIn("noise bypassed", request["note"])
+        self.assertEqual(app._snapshot_run_options().augmentation_profile.noise_probability,
+                         state.augmentation["noise"]["probability"])
+
     def test_retry_estimate_scales_the_duration(self):
         app = self._app()
         app._preview_token = 3

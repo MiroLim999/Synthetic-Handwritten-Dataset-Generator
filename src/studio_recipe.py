@@ -667,6 +667,21 @@ class StudioState:
             data["run"] = {key: value for key, value in run.items() if value is not None}
         return parse_recipe(data)
 
+    def with_bypassed(self, effects) -> "StudioState":
+        """A copy with the given ``(section, effect)`` chances set to 0.
+
+        For A/B previews only; ``("cutoff", "*")`` turns every cut side off.
+        """
+        state = self
+        for section, effect in effects:
+            data = copy.deepcopy(getattr(state, section))
+            names = (studio_spec.CUTOFF_SIDES if section == "cutoff" and effect == "*"
+                     else (effect,))
+            for name in names:
+                data[name]["probability"] = 0.0
+            state = replace(state, **{section: data})
+        return state
+
     def augmentation_profile(self):
         return augmentation_profile_from_spec(self.augmentation)
 

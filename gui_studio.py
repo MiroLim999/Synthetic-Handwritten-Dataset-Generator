@@ -149,6 +149,8 @@ class StudioPanel(ttk.Frame):
         self._background = background
         self.sliders: dict[str, RangeSlider] = {}
         self.tooltips: dict[str, tuple[Tooltip, Tooltip]] = {}
+        # A/B bypass toggles: preview only, never part of the state or a preset.
+        self.bypass_vars: dict[tuple[str, str], tk.BooleanVar] = {}
         self._controls: list[tk.Widget] = []
         self._stroke_enabled = True
         self._build()
@@ -243,16 +245,43 @@ class StudioPanel(ttk.Frame):
             for spec in specs:
                 if spec.effect != effect and spec.kind != "value":
                     effect = spec.effect
-                    ttk.Label(card, text=effect_title(effect),
-                              style=self._styles["label"]).pack(anchor="w", pady=(6, 0))
+                    self._build_effect_title(card, spec)
                 self._build_row(card, spec)
             if group == studio_spec.CHARACTER_CUTOFF:
                 ttk.Label(card, text=CUTOFF_NOTE, wraplength=420,
                           style=self._styles["hint"]).pack(anchor="w", pady=(6, 0))
 
+    def _bypass_toggle(self, parent, key: tuple[str, str], text: str):
+        var = tk.BooleanVar(value=False)
+        self.bypass_vars[key] = var
+        check = ttk.Checkbutton(parent, text=text, variable=var,
+                                command=lambda: self.event_generate(STUDIO_CHANGED,
+                                                                    when="tail"))
+        check.pack(side="right")
+        Tooltip(check, "Turn this effect off in the preview only, to compare with "
+                       "and without it. Not saved and not used by runs.")
+        return check
+
+    def _build_effect_title(self, card, spec: studio_spec.ParamSpec) -> None:
+        row = ttk.Frame(card, style=self._styles["card"])
+        row.pack(fill="x", pady=(6, 0))
+        title = ttk.Label(row, text=effect_title(spec.effect), style=self._styles["label"])
+        title.pack(side="left")
+        if spec.section != "cutoff":
+            self._bypass_toggle(row, (spec.section, spec.effect), "Bypass in preview")
+        Tooltip(title, spec.tooltip)
+
+    def bypassed(self) -> tuple[tuple[str, str], ...]:
+        return tuple(key for key, var in self.bypass_vars.items() if var.get())
+
+    def preview_state(self) -> StudioState:
+        """The state the preview renders: the real state minus bypassed effects."""
+        return self._state.with_bypassed(self.bypassed())
+
     def _build_cutoff_picks(self, card) -> None:
         row = ttk.Frame(card, style=self._styles["card"])
         row.pack(fill="x", pady=(0, 4))
+        self._bypass_toggle(row, ("cutoff", "*"), "Bypass cutoff in preview")
         ttk.Label(row, text="Quick pick", style=self._styles["label"], width=14).pack(side="left")
         for key in CUTOFF_PROFILES:
             button = ttk.Button(row, text=key.capitalize(), style="Quick.TButton",

@@ -15,7 +15,7 @@ import subprocess
 import traceback
 import webbrowser
 import tkinter as tk
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
 from tkinter import ttk, messagebox
@@ -1155,6 +1155,25 @@ class App(tk.Tk):
         raw_seed = self.seed_var.get().strip()
         temporary = not raw_seed
         grid = self.preview_grid
+        panel = self.__dict__.get("studio_panel")
+        bypassed = panel.bypassed() if panel is not None else ()
+        if bypassed:
+            preview_state = panel.preview_state()
+            options = replace(
+                options,
+                augmentation_profile=preview_state.augmentation_profile(),
+                edge_clipping=preview_state.cutoff_profile(),
+                stroke_damage_profile=(preview_state.stroke_damage_profile()
+                                       if options.stroke_damage_profile is not None
+                                       else None))
+        notes = []
+        if temporary:
+            notes.append("Example only: the seed is blank, so the run will pick its "
+                         "own seed.")
+        if bypassed:
+            names = ", ".join("cutoff" if effect == "*" else effect.replace("_", " ")
+                              for _section, effect in bypassed)
+            notes.append(f"A/B: {names} bypassed in this preview only.")
         return {
             "options": {
                 "names_version": options.names_version,
@@ -1172,8 +1191,7 @@ class App(tk.Tk):
             },
             "count": options.count,
             "seed": self._preview_temp_seed if temporary else options.seed,
-            "note": ("Example only: the seed is blank, so the run will pick its own "
-                     "seed." if temporary else ""),
+            "note": " ".join(notes),
             "n": grid.tile_count,
             "offset": grid.offset,
             "split": grid.split,
