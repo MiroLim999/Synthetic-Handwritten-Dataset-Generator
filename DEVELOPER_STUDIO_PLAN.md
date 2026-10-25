@@ -898,14 +898,14 @@ Affected files: `tests/test_preview_pipeline.py` (new)
 
 Affected files: `gui_studio.py`, `README.md`, `pyproject.toml`
 
-- [ ] Tooltips from `studio_spec` on every control.
-- [ ] Per-effect bypass toggles for A/B comparison (preview only, never saved).
-- [ ] Before/after view of a selected tile (clean render vs final image).
-- [ ] A "Developer Studio" guide in the README: workflow, ranges, cutoff, presets,
+- [x] Tooltips from `studio_spec` on every control.
+- [x] Per-effect bypass toggles for A/B comparison (preview only, never saved).
+- [x] Before/after view of a selected tile (clean render vs final image).
+- [x] A "Developer Studio" guide in the README: workflow, ranges, cutoff, presets,
       the reproduce command, and calibration.
-- [ ] Add `studio_spec`, `studio_recipe`, `cutoff`, `preview`, and `sample_pipeline`
+- [x] Add `studio_spec`, `studio_recipe`, `cutoff`, `preview`, and `sample_pipeline`
       to `[tool.mypy] files`, and make them pass.
-- [ ] Final manual run:
+- [x] Final manual run:
       - fresh clone, install, launch the GUI
       - load every bundled preset
       - generate in each mode with Heavy cutoff, and merge real data
@@ -914,30 +914,30 @@ Affected files: `gui_studio.py`, `README.md`, `pyproject.toml`
 
 ### S7 verification gate
 
-- [ ] Gate commands pass, with no unexpected golden changes.
-- [ ] The Kaggle notebook contract tests pass without changes.
+- [x] Gate commands pass, with no unexpected golden changes.
+- [x] The Kaggle notebook contract tests pass without changes.
 
 ---
 
 # Definition of done
 
-- [ ] GUI Regular mode never applies stroke damage, and the GUI field mix follows
+- [x] GUI Regular mode never applies stroke damage, and the GUI field mix follows
       the sample mode unless the user edits it.
-- [ ] Every studio effect is chance plus min/max, and built-in profiles round-trip
+- [x] Every studio effect is chance plus min/max, and built-in profiles round-trip
       without loss.
-- [ ] Character Cutoff:
+- [x] Character Cutoff:
       - clips real letters relative to the ink, with bounded ink loss
       - records every cut sample in `cutoff-annotations.csv`, hash-bound in metadata
       - passes dataset validation
-- [ ] Presets:
+- [x] Presets:
       - use v2 with optional sections, and old files migrate
       - built-ins are read-only
       - user presets support duplicate, rename, delete, import, and export
-- [ ] Every dataset contains `studio-recipe.json`. Re-running it with the same seed
+- [x] Every dataset contains `studio-recipe.json`. Re-running it with the same seed
       and count, through the GUI or the CLI, reproduces the dataset byte for byte.
-- [ ] The preview shows the real first N samples of the run, renders in the
+- [x] The preview shows the real first N samples of the run, renders in the
       background, and reports the retry rate.
-- [ ] The README matches the code. Tests, ruff, mypy, and the golden check pass, and
+- [x] The README matches the code. Tests, ruff, mypy, and the golden check pass, and
       the Kaggle contract is unchanged.
 
 # Out of scope (later)
