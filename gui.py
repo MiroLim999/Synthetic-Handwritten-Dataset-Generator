@@ -27,7 +27,7 @@ from PIL import Image, ImageDraw, ImageFont, ImageTk
 import random
 
 import config
-from gui_studio import STUDIO_CHANGED, StudioPanel
+from gui_studio import STUDIO_CHANGED, PreviewGrid, StudioPanel
 from gui_widgets import format_value, snap_value  # noqa: F401  (re-exported)
 from src import fields
 from src.augment import degrade
@@ -38,6 +38,7 @@ from src.generate_synthetic import (GenerationCancelled, field_weights_for_mode,
                                     zip_dataset)
 from src.generation_io import verify_sha256_sidecar
 from src.generation_resources import preflight_generation_resources
+from src.preview import preview_samples, retry_statistics
 from src.studio_recipe import StudioRecipe, StudioState
 from src.build_splits import build
 from src.render import (CURSIVE_STYLE_GROUPS, fonts_for_style,
@@ -64,6 +65,8 @@ SAMPLE_TEXT = "Juan Dela Cruz"
 LOG_DIR = config.ROOT / "logs"
 LOG_FILE = LOG_DIR / "gui.log"
 PRESET_DIR = config.RESOURCES_DIR / "presets"
+PREVIEW_DEBOUNCE_MS = 150
+RETRY_SAMPLES = 48
 MAX_LOG_BYTES = 2 * 1024 * 1024
 LOG_BACKUPS = 3
 
@@ -220,6 +223,11 @@ class App(tk.Tk):
             self.field_weight_vars[ftype] = tk.StringVar(value=str(weight))
         self.studio_state = StudioState.default()
         self.studio_panel = None
+        self.preview_grid = None
+        self._preview_token = 0
+        self._preview_after = None
+        self._preview_temp_seed = random.randint(1, 2_147_483_647)
+        self._mean_attempts = 1.0
         self._scroll_areas = []        # (tab, canvas) pairs for wheel scrolling
 
         self._apply_theme()
@@ -227,6 +235,7 @@ class App(tk.Tk):
         self.protocol("WM_DELETE_WINDOW", self._on_close)
         self._update_preflight_estimates()
         self.after(150, self._update_preview)
+        self.after(300, self._schedule_studio_preview)
         self.after(150, self._refresh_datasets)
         self.after(100, self._poll)
 
@@ -507,7 +516,20 @@ class App(tk.Tk):
         target_vp.yview_moveto(max(0.0, min(1.0, target_vp.yview()[0] + fraction)))
 
     def _build_studio_tab(self, parent):
-        inner = self._scroll_area(parent, parent)
+        cols = ttk.Panedwindow(parent, orient="horizontal")
+        cols.pack(fill="both", expand=True, padx=8, pady=(4, 4))
+        left_container = ttk.Frame(cols)
+        right_container = ttk.Frame(cols)
+        cols.add(left_container, weight=5)
+        cols.add(right_container, weight=6)
+        inner = self._scroll_area(left_container, parent)
+        preview_area = self._scroll_area(right_container, parent)
+        self._section_label(preview_area, "Preview of the planned run")
+        outer = ttk.Frame(preview_area)
+        outer.pack(fill="x", padx=16)
+        self.preview_grid = PreviewGrid(outer, on_request=self._schedule_studio_preview,
+                                        background=SURFACE)
+        self.preview_grid.pack(fill="x")
         self.studio_panel = StudioPanel(
             inner, state=self.studio_state, background=SURFACE,
             preset_dir=PRESET_DIR, on_recipe_loaded=self._apply_loaded_recipe,
@@ -516,6 +538,7 @@ class App(tk.Tk):
         self.studio_panel.pack(fill="both", expand=True, pady=(0, 12))
         self.studio_panel.bind(STUDIO_CHANGED, self._on_studio_changed)
         self._run_controls.extend(self.studio_panel.controls())
+        self._run_controls.extend(self.preview_grid.controls())
         self._sync_stroke_damage_state()
 
     # ------------------------------------------------------------------
@@ -737,6 +760,10 @@ class App(tk.Tk):
 
         # Trace variables for preflight estimate updates
         self.count_var.trace_add("write", lambda *args: self._update_preflight_estimates())
+        self.count_var.trace_add("write",
+                                 lambda *args: self._schedule_studio_preview(restart=True))
+        self.seed_var.trace_add("write",
+                                lambda *args: self._schedule_studio_preview(restart=True))
         self.dataset_var.trace_add("write", lambda *args: self._update_preflight_estimates())
         self.zip_var.trace_add("write", lambda *args: self._update_preflight_estimates())
 
@@ -1054,6 +1081,7 @@ class App(tk.Tk):
         self._sync_stroke_damage_state()
         self._apply_mode_field_weights()
         self._update_preview()
+        self._schedule_studio_preview(restart=True)
 
     def _grid_field_weights(self) -> dict[str, str]:
         return {ftype: var.get().strip() for ftype, var in self.field_weight_vars.items()}
@@ -1082,6 +1110,95 @@ class App(tk.Tk):
         self.studio_state = self.studio_panel.get_state()
         self._update_recipe_summary()
         self._update_preview()
+        self._schedule_studio_preview(restart=True)
+
+    # ------------------------------------------------------------------
+    # Studio preview (background rendering)
+    # ------------------------------------------------------------------
+    def _schedule_studio_preview(self, restart: bool = False):
+        """Render the preview 150 ms after the last change."""
+        grid = self.__dict__.get("preview_grid")
+        if grid is None:
+            return
+        if restart:
+            grid.offset = 0
+        if self._preview_after is not None:
+            self.after_cancel(self._preview_after)
+        self._preview_after = self.after(PREVIEW_DEBOUNCE_MS, self._start_studio_preview)
+
+    def _preview_request(self) -> dict:
+        """A plain-data snapshot of everything the preview needs."""
+        options = self._snapshot_run_options()
+        raw_seed = self.seed_var.get().strip()
+        temporary = not raw_seed
+        grid = self.preview_grid
+        return {
+            "options": {
+                "names_version": options.names_version,
+                "sample_mode": options.sample_mode,
+                "font_style": options.font_style,
+                "cursive_group": options.cursive_group,
+                "specific_font": options.specific_font,
+                "writer_profile": options.writer_profile,
+                "samples_per_writer": options.samples_per_writer,
+                "augmentation_profile": options.augmentation_profile,
+                "edge_clipping": options.edge_clipping,
+                "stroke_damage_profile": options.stroke_damage_profile,
+                "custom_field_weights": options.custom_field_weights,
+                "custom_split_fractions": options.custom_split_fractions,
+            },
+            "count": options.count,
+            "seed": self._preview_temp_seed if temporary else options.seed,
+            "note": ("Example only: the seed is blank, so the run will pick its own "
+                     "seed." if temporary else ""),
+            "n": grid.tile_count,
+            "offset": grid.offset,
+            "split": grid.split,
+        }
+
+    def _start_studio_preview(self):
+        self._preview_after = None
+        self._preview_token += 1
+        token = self._preview_token
+        try:
+            request = self._preview_request()
+        except RunOptionsError as exc:
+            self.preview_grid.show_error(str(exc))
+            return
+        self.preview_grid.set_busy()
+        threading.Thread(target=self._preview_worker, args=(token, request),
+                         daemon=True).start()
+
+    def _preview_worker(self, token: int, request: dict):
+        """Render preview tiles and retry statistics; reports only through q."""
+        try:
+            tiles = preview_samples(request["options"], count=request["count"],
+                                    seed=request["seed"], n=request["n"],
+                                    offset=request["offset"], split=request["split"])
+            self.q.put(("studio_preview", token, tiles, request["note"]))
+            stats = retry_statistics(request["options"], count=request["count"],
+                                     seed=request["seed"],
+                                     samples=min(RETRY_SAMPLES, request["count"]))
+            self.q.put(("studio_retry", token, stats))
+        except Exception as exc:
+            _log_error("studio preview", traceback.format_exc())
+            self.q.put(("studio_preview_error", token, str(exc) or exc.__class__.__name__))
+
+    def _handle_preview_message(self, msg):
+        """Apply a preview result on the UI thread; stale tokens are dropped."""
+        kind, token = msg[0], msg[1]
+        if token != self._preview_token or self.__dict__.get("preview_grid") is None:
+            return
+        if kind == "studio_preview":
+            self.preview_grid.show_tiles(msg[2], msg[3])
+        elif kind == "studio_retry":
+            stats = msg[2]
+            self._mean_attempts = stats.mean_attempts
+            self.preview_grid.set_retry_text(
+                f"Retry estimate ({stats.samples} samples): {stats.describe()}.")
+            self._update_preflight_estimates()
+        else:
+            self.preview_grid.show_error(msg[2])
 
     def _set_studio_state(self, state: StudioState):
         self.studio_state = state
@@ -1202,7 +1319,9 @@ class App(tk.Tk):
                     except ValueError:
                         pass
             est_imgs_per_sec = max(30, min(600, active_threads * 22))
-            time_sec = max(1, round(count / est_imgs_per_sec))
+            # Retries cost whole extra attempts; the studio preview measures them.
+            mean_attempts = self.__dict__.get("_mean_attempts", 1.0)
+            time_sec = max(1, round(count / est_imgs_per_sec * mean_attempts))
 
             self.est_folder_lbl.config(text=f"~{folder_mb:.1f} MB ({estimate.sample_count:,} imgs)")
             self.est_zip_lbl.config(text=f"~{zip_mb:.1f} MB" if create_zip else "Disabled")
@@ -2081,6 +2200,8 @@ class App(tk.Tk):
                         self.status.config(text=msg[1], foreground=WARNING)
                 elif kind == "merge_result":
                     self._merge_result = msg[1]
+                elif kind in ("studio_preview", "studio_retry", "studio_preview_error"):
+                    self._handle_preview_message(msg)
                 elif kind == "dataset_size":
                     self._patch_row(*msg[1:])
                 elif kind == "refresh_complete":
