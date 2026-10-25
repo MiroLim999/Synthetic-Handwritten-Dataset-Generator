@@ -1087,7 +1087,11 @@ def _validate_zip_archive(
             if len(Path(logical_name).parts) == 2
             and Path(logical_name).parts[0] in config.SPLIT_NAMES
         ]
-        for logical_name, member in sorted(image_members):
+        # Same order as provenance.hash_dataset_images: split order, then name.
+        split_order = {split: index for index, split in enumerate(config.SPLIT_NAMES)}
+        image_members.sort(key=lambda item: (
+            split_order[Path(item[0]).parts[0]], item[0].encode("utf-8")))
+        for logical_name, member in image_members:
             encoded_name = logical_name.encode("utf-8")
             image_digest.update(len(encoded_name).to_bytes(8, "big"))
             image_digest.update(encoded_name)
