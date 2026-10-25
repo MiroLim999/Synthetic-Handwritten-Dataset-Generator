@@ -1145,7 +1145,8 @@ class App(tk.Tk):
     def _cli_options(self) -> dict:
         """Count and seed for a copied CLI command."""
         return {"count": self.count_var.get().replace(",", "").strip(),
-                "seed": self.seed_var.get().strip()}
+                "seed": self.seed_var.get().strip(),
+                "mode": self._current_sample_mode()}
 
     def _reset_all_controls(self):
         """Reset every Generate-tab control, including weights and splits."""
