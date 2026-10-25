@@ -64,8 +64,8 @@ If you are using an Agentic AI coding assistant (such as **Google Gemini Antigra
 Please set up and run the Synthetic Handwriting Dataset Generator repository:
 1. Environment Setup: Create a Python virtual environment (`.venv`), activate it, upgrade pip, and install all dependencies from `requirements.txt`.
 2. Health Check: Run `python -m unittest discover -s tests -v` to ensure all unit tests pass cleanly.
-3. Dataset Generation: Run the synthetic generator to produce a dataset (e.g. `python -m src.generate_synthetic --count 1000 --seed 42`).
-4. Verification: Verify that `manifest.csv`, `dataset-validation.json`, and images are present in the output folder under `dataset/datasets/`.
+3. Dataset Generation: Run the synthetic generator to produce a dataset (e.g. `python -m src.generate_synthetic --count 1000 --seed 42`, or start from a preset with `--recipe resources/presets/historical_faded.json`).
+4. Verification: Verify that `manifest.csv`, `dataset-validation.json`, `studio-recipe.json`, `run-metadata.json`, and images are present in the output folder under `dataset/datasets/` (plus `cutoff-annotations.csv` when a cutoff other than `none` is used).
 ```
 
 ### 💻 One-Liner Execution for AI Terminal Tools:
@@ -97,7 +97,7 @@ Or on Windows, simply double-click `Generate Images.bat`.
 - **Studio tab**: the Developer Studio (see [Developer Studio guide](#developer-studio-guide)) with presets, every effect as a chance plus a range, and a faithful preview of the run.
 - **Datasets tab**: list, open, review montage and report, verify SHA-256, and delete datasets.
 - **Custom Field Weights & Split Ratios**: The field-weight grid follows the sample mode (and says so when it replaces your edits); you can then edit individual field types (`full_name`, `date_written`, `age`, etc.) and set exact Train / Val / Test percentages.
-- **Preflight Estimates Card**: Calculates estimated disk space, ZIP archive size, and generation time before starting.
+- **Reset all** (Generate tab) restores every run setting, the field weights, the split ratios, and the studio defaults.
 
 ---
 
@@ -186,8 +186,8 @@ dataset_NNN/
 | `source` | Source tag (`synthetic` or `real`) |
 | `field_type` | Synthetic field category |
 | `font` | Font filename used for rendering |
-| `sample_mode` | Degradation profile applied |
-| `writer_id` | Synthetic or real writer profile identifier |
+| `sample_mode` | Sample mode (`regular` or a `semi_broken_*` mode); the degradation settings are in `studio-recipe.json` |
+| `writer_id` | Real writer identifier; empty for synthetic rows |
 | `schema_version` | Manifest contract version (`1`) |
 
 `run-metadata.json` records generation provenance, `dataset-validation.json` verifies dataset integrity, and `image-statistics.json` documents brightness/contrast metrics.
@@ -302,6 +302,29 @@ tone) and compare again. These are descriptive statistics, not proof of
 realism; always check the review montage and a real, writer-held-out test set.
 For cutoff tuning, `python -m tools.cutoff_stats` reports attempts, the share
 of samples cut, and ink loss per cutoff profile.
+
+---
+
+## Project Layout
+
+| Path | Purpose |
+|---|---|
+| `gui.py` | Desktop app: Generate, Studio, and Datasets tabs |
+| `gui_studio.py` | Studio panel, preset bar, preview grid, real-scan comparison |
+| `gui_widgets.py` | Range and chance sliders, tooltips |
+| `config.py` | Paths, sample modes, field mix, split fractions, defaults |
+| `src/generate_synthetic.py` | Generator and CLI (`python -m src.generate_synthetic`) |
+| `src/sample_pipeline.py` | One sample attempt and the run plan, shared by runs and the preview |
+| `src/preview.py` | Studio preview and retry statistics |
+| `src/studio_spec.py` | The single table of studio parameters (bounds, steps, defaults, tooltips) |
+| `src/studio_recipe.py` | Studio Recipe v2: validation, migration, apply rules, presets, studio state |
+| `src/generation_profiles.py` | Augmentation, stroke-damage, cutoff, and writer-style profiles |
+| `src/augment.py`, `src/cutoff.py` | Degradation chain and ink-relative character cutoff |
+| `src/dataset_validation.py`, `src/handoff_validation.py` | Dataset validation and Kaggle handoff checks |
+| `src/build_splits.py` | Real-data reconciliation (`python -m src.build_splits`) |
+| `resources/presets/` | Built-in presets (read-only); user presets go in `resources/presets/user/` |
+| `tools/golden_hashes.py`, `tools/cutoff_stats.py` | Output regression check and cutoff measurement |
+| `DEVELOPER_STUDIO_PLAN.md` | The executed plan behind the Developer Studio, with its decisions |
 
 ---
 
