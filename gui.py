@@ -63,6 +63,7 @@ LOG_FILE = LOG_DIR / "gui.log"
 PRESET_DIR = config.RESOURCES_DIR / "presets"
 MAX_LOG_BYTES = 2 * 1024 * 1024
 LOG_BACKUPS = 3
+STROKE_DAMAGE_SLIDERS = ("contrast", "gap_prob", "gap_count", "scratch", "erode")
 
 
 def _rotate_log(log_path: Path | None = None) -> None:
@@ -628,7 +629,7 @@ class App(tk.Tk):
             mrow, textvariable=self.sample_mode_var, values=mode_labels,
             state="readonly", width=26)
         self.sample_mode_cb.pack(side="left")
-        self.sample_mode_cb.bind("<<ComboboxSelected>>", lambda e: self._update_preview())
+        self.sample_mode_cb.bind("<<ComboboxSelected>>", self._on_sample_mode_change)
         self._run_controls.append(self.sample_mode_cb)
 
         # Degradation Profile Dropdown
@@ -747,6 +748,7 @@ class App(tk.Tk):
         card_dev = self._card(left, pady=(0, 4))
         self.dev_sliders = {}
         self.dev_labels = {}
+        self.dev_scales = {}
         self._slider_updating = False
 
         def _make_slider(parent, name, label_text, from_, to_, default, resolution=0.01, unit=""):
@@ -768,6 +770,7 @@ class App(tk.Tk):
             ttk.Label(row, textvariable=lbl_var, style="CardHint.TLabel", width=7).pack(side="left")
             self.dev_sliders[name] = val_var
             self.dev_labels[name] = lbl_var
+            self.dev_scales[name] = scale
             self._run_controls.append(scale)
 
         _make_slider(card_dev, "fade", "Ink Fading", 0.10, 1.00, 0.65)
@@ -796,6 +799,7 @@ class App(tk.Tk):
         _make_slider(card_dev, "gap_count", "Gap Count", 0.0, 30.0, 16.0, resolution=1.0)
         _make_slider(card_dev, "scratch", "Scratch Prob", 0.00, 1.00, 0.70)
         _make_slider(card_dev, "erode", "Stroke Thin", 0.00, 1.00, 0.55)
+        self._sync_stroke_damage_state()
 
         ttk.Separator(card_dev, orient="horizontal").pack(fill="x", pady=6)
         reset_bottom_btn = ttk.Button(
@@ -1147,7 +1151,7 @@ class App(tk.Tk):
         profile = self._build_custom_developer_profile()
         crop_tuple = self._get_custom_crop_tuple()
         semi_params = self._build_semi_broken_params()
-        sample_mode_key = self.mode_by_label.get(self.sample_mode_var.get(), "regular")
+        sample_mode_key = self._current_sample_mode()
         damage_prof = "semi_broken" if sample_mode_key.startswith("semi_broken") else "regular"
         try:
             img = degrade(
@@ -1164,8 +1168,33 @@ class App(tk.Tk):
         self._preview_img = ImageTk.PhotoImage(img)
         self.preview_label.config(image=self._preview_img, text="")
 
+    def _current_sample_mode(self) -> str:
+        return self.mode_by_label.get(
+            self.sample_mode_var.get(), config.DEFAULT_SAMPLE_MODE)
+
+    def _sync_stroke_damage_state(self):
+        """Enable the Stroke Damage sliders only in semi-broken modes."""
+        if self.__dict__.get("_run_control_states"):
+            return  # a job is running; _set_job_active restores and resyncs
+        state = (
+            "normal" if self._current_sample_mode().startswith("semi_broken")
+            else "disabled"
+        )
+        scales = self.__dict__.get("dev_scales", {})
+        for name in STROKE_DAMAGE_SLIDERS:
+            scale = scales.get(name)
+            if scale is not None:
+                scale.config(state=state)
+
+    def _on_sample_mode_change(self, _event=None):
+        self._sync_stroke_damage_state()
+        self._update_preview()
+
     def _build_semi_broken_params(self):
+        """Stroke damage params, or None outside semi-broken modes."""
         if not hasattr(self, "dev_sliders"):
+            return None
+        if not self._current_sample_mode().startswith("semi_broken"):
             return None
         return {
             "contrast_prob": self.dev_sliders["contrast"].get(),
@@ -1269,6 +1298,7 @@ class App(tk.Tk):
         self._slider_updating = True
 
         self.sample_mode_var.set(config.SAMPLE_MODES[config.DEFAULT_SAMPLE_MODE])
+        self._sync_stroke_damage_state()
         self.degradation_var.set(config.DEGRADATION_PROFILES[config.DEFAULT_DEGRADATION_PROFILE])
         self.edge_clipping_var.set(config.EDGE_CLIPPING_OPTIONS[config.DEFAULT_EDGE_CLIPPING])
         self.count_var.set(str(config.DEFAULT_COUNT))
@@ -1890,6 +1920,7 @@ class App(tk.Tk):
             except tk.TclError:
                 continue
         self._run_control_states = []
+        self._sync_stroke_damage_state()
         self.btn.config(text="⚡  Generate Dataset", command=self.start,
                         state="normal")
         if not self._delete_worker_is_alive():
@@ -1970,8 +2001,7 @@ class App(tk.Tk):
         if dataset in ("", "(next)"):
             dataset = None
         names_version = self.names_var.get().strip() or None
-        sample_mode = self.mode_by_label.get(
-            self.sample_mode_var.get(), config.DEFAULT_SAMPLE_MODE)
+        sample_mode = self._current_sample_mode()
         font_style, cursive_group, specific_font = self._current_font_selection()
 
         custom_split_fractions = None

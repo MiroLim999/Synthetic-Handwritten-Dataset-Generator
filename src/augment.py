@@ -358,7 +358,8 @@ def degrade(img: Image.Image, damage_profile: str = "regular",
         )
     if rng.random() < stain_probability:
         img = _stains(img, rng=rng)
-    if damage_profile.startswith("semi_broken") or semi_broken_params:
+    # Params only tune semi-broken damage; they never switch it on.
+    if damage_profile.startswith("semi_broken"):
         img = _semi_broken(img, rng=rng, params=semi_broken_params)
     if rng.random() < rotate_probability:
         img = _rotate(
