@@ -14,6 +14,19 @@ from src.manifest import MANIFEST_COLUMNS, MANIFEST_SCHEMA_VERSION
 from src.split_policy import EVALUATION_ANNOTATION_COLUMNS
 
 
+# Format IDs src.fields emits for base-profile, non-date fields.  Mirrors
+# LEGACY_NON_DATE_FORMAT_ID_ALLOWLIST in kaggle-code/trocr-finetuning-code2.ipynb.
+BASE_NON_DATE_FORMAT_IDS: dict[str, frozenset[str]] = {
+    "full_name": frozenset({"name_mixed_representative_v1"}),
+    **{
+        field_type: frozenset({"default"})
+        for field_type in ("age", "cause_of_death", "character", "citizenship",
+                           "civil_status", "numeric", "occupation", "place",
+                           "religion", "sex")
+    },
+}
+
+
 def _json_object(content: bytes, name: str) -> dict:
     try:
         value = json.loads(content.decode("utf-8"))
@@ -175,7 +188,9 @@ def validate_handoff_bytes(
         field_patterns = pattern_ids.get(field_type, {})
         if not isinstance(field_patterns, Mapping):
             raise ValueError("run-metadata.json pattern IDs are malformed")
-        allowed_ids = field_patterns.get(expected_profile, [])
+        allowed_ids = set(field_patterns.get(expected_profile, []))
+        if not allowed_ids and expected_profile == BASE_FORMAT_PROFILE:
+            allowed_ids = set(BASE_NON_DATE_FORMAT_IDS.get(field_type, ()))
         if allowed_ids and row["format_id"] not in allowed_ids:
             raise ValueError(
                 f"Evaluation annotation {key!r} has an unsupported format ID"
