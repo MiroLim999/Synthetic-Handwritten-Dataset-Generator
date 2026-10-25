@@ -17,6 +17,10 @@ from PIL import Image
 
 from src.generation_profiles import CUTOFF_SIDE_NAMES, CutoffProfile
 
+CUTOFF_ANNOTATIONS_FILENAME = "cutoff-annotations.csv"
+CUTOFF_ANNOTATION_COLUMNS = (
+    "filename", "split", "cut_top", "cut_bottom", "cut_left", "cut_right", "ink_loss",
+)
 INK_THRESHOLD = 200
 MIN_CROP_PX = 10
 MAX_SHRINK_STEPS = 3
@@ -43,6 +47,16 @@ class CutoffResult:
 
 
 NO_CUT = CutoffResult()
+
+
+def annotation_row(filename: str, split: str, result: CutoffResult) -> dict[str, str]:
+    """One ``cutoff-annotations.csv`` row (values to 4 decimal places)."""
+    return {
+        "filename": filename,
+        "split": split,
+        **{f"cut_{side}": f"{getattr(result, side):.4f}" for side in CUTOFF_SIDE_NAMES},
+        "ink_loss": f"{result.ink_loss:.4f}",
+    }
 
 
 def ink_mask(image: Image.Image) -> Image.Image:

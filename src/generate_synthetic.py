@@ -27,6 +27,7 @@ Usage:
 
 import argparse
 import concurrent.futures
+import contextlib
 import csv
 import hashlib
 import json
@@ -46,6 +47,8 @@ from tqdm import tqdm
 import config
 from src import fields
 from src.augment import degrade_detailed
+from src.cutoff import (CUTOFF_ANNOTATION_COLUMNS, CUTOFF_ANNOTATIONS_FILENAME,
+                        annotation_row)
 from src.dataset_validation import (REPORT_FILENAME, assess_image_quality,
                                     validate_dataset, MONTAGE_FILENAME)
 from src.dataset_mutation import (assert_no_sibling_archive,
@@ -61,6 +64,7 @@ from src.generation_io import (AtomicCsvWriter, GenerationCounters,
                                verify_sha256_sidecar, write_sha256_sidecar)
 from src.generation_profiles import (DEFAULT_AUGMENTATION_PROFILE_ID,
                                      DEFAULT_WRITER_PROFILE_ID,
+                                     CutoffProfile,
                                      StrokeDamageProfile,
                                      as_cutoff_profile,
                                      as_stroke_damage_profile,
@@ -89,6 +93,7 @@ MAX_SAMPLE_ATTEMPTS = 20
 GENERATOR_SOURCE_FILES = (
     "config.py",
     "src/augment.py",
+    "src/cutoff.py",
     "src/dataset_validation.py",
     "src/fields.py",
     "src/generation_io.py",
@@ -389,11 +394,14 @@ def _run_metadata(*, seed: int, count: int, sample_mode: str,
                   generation_started_at: str, resource_estimate,
                   writer_profile, augmentation_profile,
                   counters: GenerationCounters, writer_assigner,
-                  edge_clipping: str = "none",
+                  cutoff_profile: CutoffProfile | None = None,
                   stroke_damage_profile: StrokeDamageProfile | None = None,
                   field_weights: dict | None = None,
                   split_fractions: tuple | None = None) -> dict:
     """Build the complete provenance record written before publication."""
+    cutoff_profile = as_cutoff_profile(cutoff_profile)
+    cutoff_path = manifest_path.parent / CUTOFF_ANNOTATIONS_FILENAME
+    has_cutoff_annotations = cutoff_path.is_file()
     return {
         "metadata_schema_version": 1,
         "generation_started_at": generation_started_at,
@@ -413,7 +421,7 @@ def _run_metadata(*, seed: int, count: int, sample_mode: str,
             "font_style": font_style,
             "cursive_group": cursive_group,
             "specific_font": specific_font,
-            "edge_clipping": edge_clipping,
+            "edge_clipping": cutoff_profile.profile_id,
             "font_files": [Path(path).name for path in effective_fonts],
             "field_weights": field_weights,
             "split_fractions": list(split_fractions) if split_fractions else None,
@@ -435,6 +443,13 @@ def _run_metadata(*, seed: int, count: int, sample_mode: str,
         "stroke_damage_profile": (
             None if stroke_damage_profile is None
             else stroke_damage_profile.to_metadata()
+        ),
+        "cutoff_profile": cutoff_profile.to_metadata(),
+        "cutoff_annotations": (
+            CUTOFF_ANNOTATIONS_FILENAME if has_cutoff_annotations else None
+        ),
+        "cutoff_annotations_sha256": (
+            sha256_file(cutoff_path) if has_cutoff_annotations else None
         ),
         "generation_resources": resource_estimate.to_metadata(),
         "generation_counters": counters.to_metadata(),
@@ -551,7 +566,7 @@ def generate(count: int, dataset=None, seed: int = config.RANDOM_SEED,
              writer_profile=DEFAULT_WRITER_PROFILE_ID,
              augmentation_profile=DEFAULT_AUGMENTATION_PROFILE_ID,
              samples_per_writer: int = 32,
-             edge_clipping: str | tuple[float, float, float, float] = "none",
+             edge_clipping: str | CutoffProfile | tuple | None = "none",
              semi_broken_params: dict | StrokeDamageProfile | None = None,
              custom_field_weights: dict[str, int] | None = None,
              custom_split_fractions: tuple[float, float, float] | None = None,
@@ -587,6 +602,7 @@ def generate(count: int, dataset=None, seed: int = config.RANDOM_SEED,
     effective_fonts = tuple(str(font) for font in effective_fonts)
     writer_profile = get_writer_style_profile(writer_profile)
     augmentation_profile = get_augmentation_profile(augmentation_profile)
+    cutoff_profile = as_cutoff_profile(edge_clipping)
     if stroke_damage_profile is not None and semi_broken_params is not None:
         raise ValueError(
             "Pass stroke_damage_profile or its alias semi_broken_params, not both")
@@ -677,7 +693,7 @@ def generate(count: int, dataset=None, seed: int = config.RANDOM_SEED,
             task_items.append((
                 i, field_type, split, file_name, str(names_dir), sample_mode,
                 font_style, cursive_group, synthetic_writer_id, seed,
-                writer_profile, augmentation_profile, edge_clipping,
+                writer_profile, augmentation_profile, cutoff_profile,
                 stroke_damage_profile, effective_fonts, str(out_file)
             ))
 
@@ -713,7 +729,7 @@ def generate(count: int, dataset=None, seed: int = config.RANDOM_SEED,
                 augmentation_profile,
                 item_rng,
                 item_np_rng,
-                edge_clipping=edge_clipping,
+                edge_clipping=cutoff_profile,
                 stroke_damage_profile=stroke_damage_profile,
             )
             out_file = split_dirs[split] / file_name
@@ -729,11 +745,15 @@ def generate(count: int, dataset=None, seed: int = config.RANDOM_SEED,
         manifest_path = staging_dir / "manifest.csv"
         labels_path = staging_dir / "labels.csv"
         format_source_path = staging_dir / ".evaluation-source.csv"
+        cutoff_path = staging_dir / CUTOFF_ANNOTATIONS_FILENAME
         with (AtomicCsvWriter(manifest_path, MANIFEST_COLUMNS) as manifest_writer,
               AtomicCsvWriter(
                   labels_path, ("filename", "label", "split")) as labels_writer,
               AtomicCsvWriter(
-                  format_source_path, FORMAT_SOURCE_COLUMNS) as format_writer):
+                  format_source_path, FORMAT_SOURCE_COLUMNS) as format_writer,
+              (AtomicCsvWriter(cutoff_path, CUTOFF_ANNOTATION_COLUMNS)
+               if cutoff_profile.active
+               else contextlib.nullcontext()) as cutoff_writer):
 
             executor_cls = concurrent.futures.ProcessPoolExecutor if workers > 1 else concurrent.futures.ThreadPoolExecutor
             worker_fn = _process_one_worker_task if workers > 1 else _process_one_item
@@ -802,7 +822,7 @@ def generate(count: int, dataset=None, seed: int = config.RANDOM_SEED,
 
             for idx in sorted(results.keys()):
                 (i, file_name, label, split, field_type, font_used, format_profile,
-                 format_id, _cutoff_result) = results[idx]
+                 format_id, cutoff_result) = results[idx]
                 manifest_writer.write({
                     "filename": file_name,
                     "label": label,
@@ -824,6 +844,8 @@ def generate(count: int, dataset=None, seed: int = config.RANDOM_SEED,
                     "format_id": format_id,
                 })
                 counters.observe(split=split, field_type=field_type)
+                if cutoff_writer is not None and cutoff_result.is_cut:
+                    cutoff_writer.write(annotation_row(file_name, split, cutoff_result))
 
         _raise_if_cancelled(cancel_event)
         _write_evaluation_annotations_streaming(
@@ -857,7 +879,7 @@ def generate(count: int, dataset=None, seed: int = config.RANDOM_SEED,
                 augmentation_profile=augmentation_profile,
                 counters=counters,
                 writer_assigner=writer_assigner,
-                edge_clipping=edge_clipping,
+                cutoff_profile=cutoff_profile,
                 stroke_damage_profile=stroke_damage_profile,
                 field_weights={
                     key: value for key, value in sorted(field_weights.items())
