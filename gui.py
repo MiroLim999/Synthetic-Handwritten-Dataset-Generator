@@ -2377,6 +2377,19 @@ class App(tk.Tk):
             recipe_source=self.__dict__.get("_loaded_recipe_key"),
         )
 
+    @staticmethod
+    def _worker_args(options: RunOptions, cancel_event) -> tuple:
+        """Positional arguments for :meth:`_run` from a run snapshot."""
+        return (options.count, options.dataset, options.seed,
+                options.names_version, options.sample_mode,
+                options.font_style, options.cursive_group, options.specific_font,
+                options.merge_real, options.package_zip, cancel_event,
+                options.augmentation_profile, options.edge_clipping,
+                options.stroke_damage_profile, options.custom_field_weights,
+                options.custom_split_fractions, options.workers,
+                options.writer_profile, options.samples_per_writer,
+                options.recipe, options.recipe_source)
+
     def start(self):
         if self._any_worker_is_alive():
             return
@@ -2407,15 +2420,7 @@ class App(tk.Tk):
 
         self.worker = threading.Thread(
             target=self._run,
-            args=(options.count, options.dataset, options.seed,
-                  options.names_version, options.sample_mode,
-                  options.font_style, options.cursive_group, options.specific_font,
-                  options.merge_real, options.package_zip, self.cancel_event,
-                  options.augmentation_profile, options.edge_clipping,
-                  options.stroke_damage_profile, options.custom_field_weights,
-                  options.custom_split_fractions, options.workers,
-                  options.writer_profile, options.samples_per_writer,
-                  options.recipe, options.recipe_source),
+            args=self._worker_args(options, self.cancel_event),
             daemon=False)
         self.worker.start()
 
