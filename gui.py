@@ -64,7 +64,51 @@ LOG_FILE = LOG_DIR / "gui.log"
 PRESET_DIR = config.RESOURCES_DIR / "presets"
 MAX_LOG_BYTES = 2 * 1024 * 1024
 LOG_BACKUPS = 3
-STROKE_DAMAGE_SLIDERS = ("contrast", "gap_prob", "gap_count", "scratch", "erode")
+
+
+@dataclass(frozen=True)
+class SliderSpec:
+    """One Developer Studio slider: range, step, unit, and default."""
+
+    name: str
+    label: str
+    low: float
+    high: float
+    default: float
+    step: float
+    unit: str = ""
+
+
+DEGRADATION_SLIDER_SPECS = (
+    SliderSpec("fade", "Ink contrast", 0.10, 1.00, 0.65, 0.01),
+    SliderSpec("tint", "Paper tint", 0.00, 0.40, 0.15, 0.01),
+    SliderSpec("stain", "Stain chance", 0.00, 1.00, 0.35, 0.01),
+    SliderSpec("rotate", "Tilt angle", 0.0, 12.0, 4.5, 0.1, "°"),
+    SliderSpec("blur", "Blur radius", 0.0, 3.0, 0.0, 0.1, "px"),
+    SliderSpec("noise", "Grain noise", 0.0, 40.0, 12.0, 1.0),
+    SliderSpec("texture", "Paper fiber", 0.0, 12.0, 3.5, 0.1),
+    SliderSpec("scanline", "Scanlines", 0.0, 30.0, 10.0, 1.0),
+    SliderSpec("jpeg", "JPEG quality", 20.0, 100.0, 75.0, 1.0),
+)
+CROP_SLIDER_SPECS = (
+    SliderSpec("crop_top", "Top cut", 0.0, 15.0, 0.0, 1.0, "%"),
+    SliderSpec("crop_bottom", "Bottom cut", 0.0, 15.0, 0.0, 1.0, "%"),
+    SliderSpec("crop_left", "Left cut", 0.0, 15.0, 0.0, 1.0, "%"),
+    SliderSpec("crop_right", "Right cut", 0.0, 15.0, 0.0, 1.0, "%"),
+)
+STROKE_SLIDER_SPECS = (
+    SliderSpec("contrast", "Contrast-drop chance", 0.00, 1.00, 0.80, 0.01),
+    SliderSpec("gap_prob", "Gap chance", 0.00, 1.00, 0.90, 0.01),
+    SliderSpec("gap_count", "Max gaps", 0.0, 30.0, 16.0, 1.0),
+    SliderSpec("scratch", "Scratch chance", 0.00, 1.00, 0.70, 0.01),
+    SliderSpec("erode", "Stroke-thin chance", 0.00, 1.00, 0.55, 0.01),
+)
+SLIDER_SPECS = {
+    spec.name: spec
+    for spec in (*DEGRADATION_SLIDER_SPECS, *CROP_SLIDER_SPECS, *STROKE_SLIDER_SPECS)
+}
+STROKE_DAMAGE_SLIDERS = tuple(spec.name for spec in STROKE_SLIDER_SPECS)
+SLIDER_LABEL_WIDTH = 20
 
 
 def _rotate_log(log_path: Path | None = None) -> None:
@@ -758,54 +802,43 @@ class App(tk.Tk):
         self.dev_scales = {}
         self._slider_updating = False
 
-        def _make_slider(parent, name, label_text, from_, to_, default, resolution=0.01, unit=""):
+        def _make_slider(parent, spec):
             row = ttk.Frame(parent, style="Card.TFrame")
             row.pack(fill="x", pady=(0, 4))
-            ttk.Label(row, text=label_text, style="CardLabel.TLabel", width=13).pack(side="left")
-            val_var = tk.DoubleVar(value=default)
-            lbl_var = tk.StringVar(value=f"{default:.2f}{unit}" if resolution < 1.0 else f"{int(default)}{unit}")
+            ttk.Label(row, text=spec.label, style="CardLabel.TLabel",
+                      width=SLIDER_LABEL_WIDTH).pack(side="left")
+            val_var = tk.DoubleVar(value=spec.default)
+            lbl_var = tk.StringVar(value=self._slider_text(spec.name, spec.default))
 
             def _on_move(val):
                 if getattr(self, "_slider_updating", False):
                     return
-                v = float(val)
-                lbl_var.set(f"{v:.2f}{unit}" if resolution < 1.0 else f"{int(v)}{unit}")
-                self._on_developer_slider_change(name)
+                lbl_var.set(self._slider_text(spec.name, float(val)))
+                self._on_developer_slider_change(spec.name)
 
-            scale = ttk.Scale(row, from_=from_, to=to_, variable=val_var, command=_on_move)
+            scale = ttk.Scale(row, from_=spec.low, to=spec.high, variable=val_var,
+                              command=_on_move)
             scale.pack(side="left", fill="x", expand=True, padx=(0, 6))
             ttk.Label(row, textvariable=lbl_var, style="CardHint.TLabel", width=7).pack(side="left")
-            self.dev_sliders[name] = val_var
-            self.dev_labels[name] = lbl_var
-            self.dev_scales[name] = scale
+            self.dev_sliders[spec.name] = val_var
+            self.dev_labels[spec.name] = lbl_var
+            self.dev_scales[spec.name] = scale
             self._run_controls.append(scale)
 
-        _make_slider(card_dev, "fade", "Ink Fading", 0.10, 1.00, 0.65)
-        _make_slider(card_dev, "tint", "Paper Tint", 0.00, 0.40, 0.15)
-        _make_slider(card_dev, "stain", "Stain Prob", 0.00, 1.00, 0.35)
-        _make_slider(card_dev, "rotate", "Tilt Angle", 0.0, 12.0, 4.5, unit="°")
-        _make_slider(card_dev, "blur", "Blur Radius", 0.0, 3.0, 0.0, unit="px")
-        _make_slider(card_dev, "noise", "Grain Noise", 0.0, 40.0, 12.0, resolution=1.0)
-        _make_slider(card_dev, "texture", "Paper Fiber", 0.0, 12.0, 3.5)
-        _make_slider(card_dev, "scanline", "Scanlines", 0.0, 30.0, 10.0, resolution=1.0)
-        _make_slider(card_dev, "jpeg", "JPEG Quality", 20.0, 100.0, 75.0, resolution=1.0)
+        ttk.Label(card_dev, text="Ink, paper and scanner (Ink contrast: lower = more faded)",
+                  style="Sub.TLabel").pack(anchor="w", pady=(0, 4))
+        for spec in DEGRADATION_SLIDER_SPECS:
+            _make_slider(card_dev, spec)
 
         ttk.Separator(card_dev, orient="horizontal").pack(fill="x", pady=6)
         ttk.Label(card_dev, text="Character Cutoff / Edge Crops", style="Sub.TLabel").pack(anchor="w", pady=(0, 4))
-
-        _make_slider(card_dev, "crop_top", "Top Cut %", 0.0, 15.0, 0.0, resolution=1.0, unit="%")
-        _make_slider(card_dev, "crop_bottom", "Bottom Cut %", 0.0, 15.0, 0.0, resolution=1.0, unit="%")
-        _make_slider(card_dev, "crop_left", "Left Cut %", 0.0, 15.0, 0.0, resolution=1.0, unit="%")
-        _make_slider(card_dev, "crop_right", "Right Cut %", 0.0, 15.0, 0.0, resolution=1.0, unit="%")
+        for spec in CROP_SLIDER_SPECS:
+            _make_slider(card_dev, spec)
 
         ttk.Separator(card_dev, orient="horizontal").pack(fill="x", pady=6)
-        ttk.Label(card_dev, text="Stroke Damage (Semi-Broken)", style="Sub.TLabel").pack(anchor="w", pady=(0, 4))
-
-        _make_slider(card_dev, "contrast", "Contrast Drop", 0.00, 1.00, 0.80)
-        _make_slider(card_dev, "gap_prob", "Gap Prob", 0.00, 1.00, 0.90)
-        _make_slider(card_dev, "gap_count", "Gap Count", 0.0, 30.0, 16.0, resolution=1.0)
-        _make_slider(card_dev, "scratch", "Scratch Prob", 0.00, 1.00, 0.70)
-        _make_slider(card_dev, "erode", "Stroke Thin", 0.00, 1.00, 0.55)
+        ttk.Label(card_dev, text="Stroke Damage (semi-broken modes only)", style="Sub.TLabel").pack(anchor="w", pady=(0, 4))
+        for spec in STROKE_SLIDER_SPECS:
+            _make_slider(card_dev, spec)
         self._sync_stroke_damage_state()
 
         ttk.Separator(card_dev, orient="horizontal").pack(fill="x", pady=6)
@@ -1217,6 +1250,13 @@ class App(tk.Tk):
                 text=(f"Field weights reset to the {config.SAMPLE_MODES[mode]} mix; "
                       "your edits were replaced."),
                 foreground=WARNING)
+
+    @staticmethod
+    def _slider_text(name: str, value: float) -> str:
+        spec = SLIDER_SPECS[name]
+        if spec.step < 1.0:
+            return f"{value:.2f}{spec.unit}"
+        return f"{int(value)}{spec.unit}"
 
     def _build_semi_broken_params(self):
         """Stroke damage params, or None outside semi-broken modes."""
