@@ -49,11 +49,10 @@ from tqdm import tqdm
 
 import config
 from src import fields
-from src.augment import degrade_detailed
 from src.cutoff import (CUTOFF_ANNOTATION_COLUMNS, CUTOFF_ANNOTATIONS_FILENAME,
                         annotation_row)
-from src.dataset_validation import (REPORT_FILENAME, assess_image_quality,
-                                    validate_dataset, MONTAGE_FILENAME)
+from src.dataset_validation import (REPORT_FILENAME, validate_dataset,
+                                    MONTAGE_FILENAME)
 from src.dataset_mutation import (assert_no_sibling_archive,
                                   dataset_mutation_lock)
 from src.handoff_validation import (validate_handoff_bytes,
@@ -96,7 +95,8 @@ from src.provenance import (atomic_write_json, configuration_snapshot,
                             resource_hashes, sha256_file, source_hashes,
                             utc_now_iso)
 from src.render import (CURSIVE_STYLE_GROUPS, FONT_STYLES,
-                        font_path_for, fonts_for_style, render_text)
+                        font_path_for, fonts_for_style)
+from src.sample_pipeline import MAX_SAMPLE_ATTEMPTS, generate_valid_sample  # noqa: F401
 from src.split_policy import (EVALUATION_ANNOTATION_COLUMNS,
                               build_synthetic_evaluation_policy)
 
@@ -104,7 +104,6 @@ from src.split_policy import (EVALUATION_ANNOTATION_COLUMNS,
 EVALUATION_ANNOTATIONS_FILENAME = "evaluation-annotations.csv"
 IMAGE_STATISTICS_FILENAME = "image-statistics.json"
 STATISTICS_SAMPLE_LIMIT = 512
-MAX_SAMPLE_ATTEMPTS = 20
 GENERATOR_SOURCE_FILES = (
     "config.py",
     "src/augment.py",
@@ -120,6 +119,7 @@ GENERATOR_SOURCE_FILES = (
     "src/manifest.py",
     "src/provenance.py",
     "src/render.py",
+    "src/sample_pipeline.py",
     "src/split_policy.py",
     "src/studio_recipe.py",
     "src/studio_spec.py",
@@ -317,66 +317,16 @@ def _generate_valid_sample(field_type: str, split: str, file_name: str,
     )
     if damage_profile == "semi_broken" and stroke_damage_profile is None:
         stroke_damage_profile = stroke_damage_from_config()
-    cutoff_profile = as_cutoff_profile(edge_clipping)
-    failures = []
-    for attempt in range(1, MAX_SAMPLE_ATTEMPTS + 1):
-        format_profile = evaluation_policy.format_profile_for_field(
-            split, field_type
-        )
-        label, format_id = fields.make_value_with_format(
-            field_type,
-            rng=rng,
-            names_dir=names_dir,
-            format_profile=format_profile,
-        )
-        image, font_used = render_text(
-            label,
-            font_style=font_style,
-            cursive_group=cursive_group,
-            specific_font="",
-            rng=rng,
-            writer_style=writer_style,
-            font_pool=evaluation_policy.fonts_for_split(split),
-        )
-        current_aug_profile = augmentation_profile
-
-        # Fail-safe recovery for extreme attempts (>15): use safe parameters so massive jobs never crash
-        if attempt > 15:
-            current_damage_profile = "regular"
-            current_stroke_damage = None
-            current_edge_clipping = "none"
-        else:
-            current_damage_profile = damage_profile
-            current_edge_clipping = cutoff_profile.constrained_for_label(label)
-            # Short-label safeguard and progressive backoff for every
-            # semi-broken run.
-            current_stroke_damage = (
-                stroke_damage_profile.constrained_for_label(label, attempt)
-                if damage_profile == "semi_broken" else None
-            )
-
-        degraded = degrade_detailed(
-            image,
-            damage_profile=current_damage_profile,
-            rng=rng,
-            np_rng=np_rng,
-            augmentation_profile=current_aug_profile,
-            edge_clipping=current_edge_clipping,
-            semi_broken_params=current_stroke_damage,
-        )
-        image = evaluation_policy.apply_degradation_holdout(
-            degraded.image, split, sample_key=file_name
-        )
-        _statistics, errors, _warnings = assess_image_quality(
-            image, cut_sides=degraded.cutoff.cut_sides)
-        if not errors:
-            return label, image, font_used, format_profile, format_id, degraded.cutoff
-        failures = errors
-    detail = "; ".join(failures) or "unknown image-quality failure"
-    raise ValueError(
-        f"Could not produce a valid {field_type!r} sample after "
-        f"{MAX_SAMPLE_ATTEMPTS} attempts: {detail}"
+    result = generate_valid_sample(
+        field_type=field_type, split=split, file_name=file_name,
+        names_dir=names_dir, font_style=font_style, cursive_group=cursive_group,
+        evaluation_policy=evaluation_policy, writer_style=writer_style,
+        augmentation_profile=augmentation_profile, rng=rng, np_rng=np_rng,
+        damage_profile=damage_profile, stroke_damage_profile=stroke_damage_profile,
+        cutoff_profile=as_cutoff_profile(edge_clipping),
     )
+    return (result.label, result.image, result.font, result.format_profile,
+            result.format_id, result.cutoff)
 
 
 def _process_one_worker_task(task_args):
