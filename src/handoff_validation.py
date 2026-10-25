@@ -9,6 +9,7 @@ import json
 from collections.abc import Mapping
 from pathlib import Path
 
+from src.cutoff import CUTOFF_ANNOTATIONS_FILENAME
 from src.fields import BASE_FORMAT_PROFILE
 from src.manifest import MANIFEST_COLUMNS, MANIFEST_SCHEMA_VERSION
 from src.split_policy import EVALUATION_ANNOTATION_COLUMNS
@@ -62,8 +63,13 @@ def validate_handoff_bytes(
     validation_content: bytes,
     manifest_sha256: str,
     images_sha256: str,
+    cutoff_annotations_content: bytes | None = None,
 ) -> None:
-    """Require provenance and synthetic annotations to match current bytes."""
+    """Require provenance and synthetic annotations to match current bytes.
+
+    ``cutoff_annotations_content`` is the optional cutoff sidecar.  Whenever
+    run metadata names it, it must be present and match the recorded hash.
+    """
     if hashlib.sha256(manifest_content).hexdigest() != manifest_sha256:
         raise ValueError("Internal manifest hash calculation mismatch")
     manifest_rows = _csv_rows(
@@ -105,6 +111,20 @@ def validate_handoff_bytes(
         raise ValueError(
             "run-metadata.json is stale: evaluation annotation hash mismatch"
         )
+
+    named_cutoff = metadata.get("cutoff_annotations")
+    if named_cutoff is not None:
+        if named_cutoff != CUTOFF_ANNOTATIONS_FILENAME:
+            raise ValueError("run-metadata.json names an unexpected cutoff sidecar")
+        if cutoff_annotations_content is None:
+            raise ValueError(
+                f"Missing {CUTOFF_ANNOTATIONS_FILENAME} named by run-metadata.json")
+        if (metadata.get("cutoff_annotations_sha256")
+                != hashlib.sha256(cutoff_annotations_content).hexdigest()):
+            raise ValueError("run-metadata.json is stale: cutoff annotation hash mismatch")
+    elif cutoff_annotations_content is not None:
+        raise ValueError(
+            f"run-metadata.json does not identify {CUTOFF_ANNOTATIONS_FILENAME}")
 
     policy = metadata.get("evaluation_policy")
     if not isinstance(policy, Mapping) or policy.get("policy_version") != "1":
@@ -239,8 +259,11 @@ def validate_handoff_files(
         if not path.is_file():
             raise FileNotFoundError(f"Missing required Kaggle handoff artifact: {path}")
         content[argument] = path.read_bytes()
+    cutoff_path = dataset_dir / CUTOFF_ANNOTATIONS_FILENAME
     validate_handoff_bytes(
         **content,
+        cutoff_annotations_content=(
+            cutoff_path.read_bytes() if cutoff_path.is_file() else None),
         manifest_sha256=manifest_sha256,
         images_sha256=images_sha256,
     )

@@ -1108,6 +1108,10 @@ def _validate_zip_archive(
             validation_content=archive.read(archived_files[REPORT_FILENAME]),
             manifest_sha256=expected_snapshot["manifest.csv"],
             images_sha256=image_digest.hexdigest(),
+            cutoff_annotations_content=(
+                archive.read(archived_files[CUTOFF_ANNOTATIONS_FILENAME])
+                if CUTOFF_ANNOTATIONS_FILENAME in archived_files else None
+            ),
         )
 
 

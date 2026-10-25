@@ -15,6 +15,8 @@ from typing import Iterable, Iterator
 import numpy as np
 from PIL import Image, ImageDraw, ImageOps, UnidentifiedImageError
 
+from src.cutoff import CUTOFF_ANNOTATION_COLUMNS, CUTOFF_ANNOTATIONS_FILENAME
+from src.generation_profiles import CUTOFF_SIDE_NAMES
 from src.manifest import MANIFEST_COLUMNS, MANIFEST_SCHEMA_VERSION
 from src.provenance import atomic_write_json, hash_dataset_images, sha256_file, utc_now_iso
 
@@ -25,6 +27,7 @@ REPORT_FILENAME = "dataset-validation.json"
 MONTAGE_FILENAME = "review-montage.jpg"
 MAX_REPORTED_DIAGNOSTICS = 1_000
 MAX_MONTAGE_SAMPLES = 24
+MAX_MONTAGE_CUT_SAMPLES = 4
 
 
 @dataclass(frozen=True)
@@ -197,6 +200,17 @@ def _initialize_validation_index(connection: sqlite3.Connection) -> None:
             field_type TEXT PRIMARY KEY,
             sample_count INTEGER NOT NULL
         ) WITHOUT ROWID;
+        CREATE TABLE cutoff_rows (
+            filename_fold TEXT PRIMARY KEY,
+            split TEXT NOT NULL,
+            cut_top REAL NOT NULL,
+            cut_bottom REAL NOT NULL,
+            cut_left REAL NOT NULL,
+            cut_right REAL NOT NULL,
+            ink_loss REAL NOT NULL,
+            line_number INTEGER NOT NULL,
+            matched INTEGER NOT NULL DEFAULT 0
+        ) WITHOUT ROWID;
         CREATE TABLE image_stats (
             width REAL,
             height REAL,
@@ -338,6 +352,74 @@ def assess_image_quality(
     )
 
 
+def _load_cutoff_annotations(
+    path: Path, connection: sqlite3.Connection, report: ValidationReport
+) -> bool:
+    """Index ``cutoff-annotations.csv`` rows; return whether the file exists."""
+    if not path.is_file():
+        return False
+    try:
+        with path.open("r", encoding="utf-8", newline="") as handle:
+            reader = csv.reader(handle, strict=True)
+            header = tuple(next(reader, ()))
+            if header != CUTOFF_ANNOTATION_COLUMNS:
+                report.add_error(
+                    f"{CUTOFF_ANNOTATIONS_FILENAME} columns must be exactly "
+                    f"{CUTOFF_ANNOTATION_COLUMNS}; found {header}"
+                )
+                return True
+            for raw in reader:
+                line_number = reader.line_num
+                where = f"{CUTOFF_ANNOTATIONS_FILENAME} row {line_number}"
+                if len(raw) != len(CUTOFF_ANNOTATION_COLUMNS):
+                    report.add_error(f"{where}: malformed row")
+                    continue
+                row = dict(zip(CUTOFF_ANNOTATION_COLUMNS, raw))
+                filename = row["filename"]
+                if (not _is_leaf_filename(filename)
+                        or Path(filename).suffix.lower() != ".png"):
+                    report.add_error(f"{where}: invalid image filename {filename!r}")
+                    continue
+                try:
+                    values = [float(row[column])
+                              for column in CUTOFF_ANNOTATION_COLUMNS[2:]]
+                except ValueError:
+                    report.add_error(f"{where}: values must be numbers")
+                    continue
+                if not all(math.isfinite(v) and 0.0 <= v < 1.0 for v in values):
+                    report.add_error(f"{where}: values must be in [0, 1)")
+                    continue
+                if not any(v > 0 for v in values[:4]):
+                    report.add_error(f"{where}: records no cut side")
+                    continue
+                inserted = connection.execute(
+                    "INSERT OR IGNORE INTO cutoff_rows "
+                    "(filename_fold, split, cut_top, cut_bottom, cut_left, cut_right, "
+                    "ink_loss, line_number) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (filename.casefold(), row["split"], *values, line_number),
+                )
+                if inserted.rowcount == 0:
+                    report.add_error(f"{where}: duplicate filename {filename!r}")
+    except (OSError, UnicodeError, csv.Error) as exc:
+        report.add_error(f"Could not read {CUTOFF_ANNOTATIONS_FILENAME}: {exc}")
+    return True
+
+
+def _cut_sides_for(connection: sqlite3.Connection, split: str,
+                   filename_fold: str) -> frozenset[str] | None:
+    """Cut sides of a matching sidecar row (marking it matched), or None."""
+    found = connection.execute(
+        "SELECT cut_top, cut_bottom, cut_left, cut_right FROM cutoff_rows "
+        "WHERE filename_fold=? AND split=?",
+        (filename_fold, split),
+    ).fetchone()
+    if found is None:
+        return None
+    connection.execute(
+        "UPDATE cutoff_rows SET matched=1 WHERE filename_fold=?", (filename_fold,))
+    return frozenset(side for side, value in zip(CUTOFF_SIDE_NAMES, found) if value > 0)
+
+
 def _image_quality(
     path: Path, cut_sides: frozenset[str] = frozenset()
 ) -> tuple[dict, list[str], list[str]]:
@@ -354,14 +436,18 @@ def _percentile(values: list[float], percentile: float) -> float:
 
 
 def _write_montage(
-    dataset_dir: Path, samples: list[tuple[dict, Path]], max_samples: int = 24
+    dataset_dir: Path, samples: list[tuple[dict, Path]], max_samples: int = 24,
+    cut_samples: list[tuple[dict, Path]] | None = None,
 ) -> Path | None:
-    if not samples:
+    cut_samples = list(cut_samples or [])[:MAX_MONTAGE_CUT_SAMPLES]
+    if not samples and not cut_samples:
         return None
 
     selected = []
     seen_groups = set()
     for row, path in samples:
+        if len(selected) >= max_samples - len(cut_samples):
+            break
         key = (
             row.get("source", ""),
             row.get("field_type", ""),
@@ -372,8 +458,7 @@ def _write_montage(
             continue
         seen_groups.add(key)
         selected.append((row, path))
-        if len(selected) >= max_samples:
-            break
+    selected.extend(cut_samples)
 
     tile_width, tile_height = 480, 150
     columns = 2
@@ -392,6 +477,8 @@ def _write_montage(
             f"{row.get('split', '')}/{row.get('source', '')}/"
             f"{row.get('field_type', '')}: {row.get('label', '')}"
         )
+        if row.get("cut_sides"):
+            caption = f"cut:{row['cut_sides']} {caption}"
         draw.text((x + 8, y + 112), caption[:76], fill="black")
 
     output = dataset_dir / MONTAGE_FILENAME
@@ -422,6 +509,7 @@ def validate_dataset(
     counts_by_source: Counter[str] = Counter()
     montage_samples: list[tuple[dict[str, str], Path]] = []
     montage_groups: set[tuple[str, str, str, str]] = set()
+    montage_cut_samples: list[tuple[dict[str, str], Path]] = []
     manifest_row_count = 0
     actual_image_count = 0
 
@@ -430,6 +518,8 @@ def validate_dataset(
         connection = sqlite3.connect(database_path)
         try:
             _initialize_validation_index(connection)
+            has_cutoff_annotations = _load_cutoff_annotations(
+                dataset_dir / CUTOFF_ANNOTATIONS_FILENAME, connection, report)
 
             for record in _iter_manifest(manifest_path, report):
                 manifest_row_count += 1
@@ -554,7 +644,17 @@ def validate_dataset(
                     if (resolved_path.parent != resolved_split
                             or not resolved_path.is_file()):
                         raise ValueError("not a direct-child file")
-                    stats, errors, warnings = _image_quality(resolved_path)
+                    cut_sides = (
+                        _cut_sides_for(connection, split, filename_fold)
+                        if has_cutoff_annotations and source == "synthetic"
+                        else None
+                    ) or frozenset()
+                    stats, errors, warnings = _image_quality(resolved_path, cut_sides)
+                    if cut_sides and len(montage_cut_samples) < MAX_MONTAGE_CUT_SAMPLES:
+                        cut_row = dict(row)
+                        cut_row["cut_sides"] = "+".join(
+                            side for side in CUTOFF_SIDE_NAMES if side in cut_sides)
+                        montage_cut_samples.append((cut_row, resolved_path))
                     connection.execute(
                         "INSERT INTO image_stats VALUES (?, ?, ?, ?, ?, ?)",
                         (
@@ -639,6 +739,17 @@ def validate_dataset(
                     f"Orphan image is not in manifest: {split}/{filename}"
                 )
 
+            if has_cutoff_annotations:
+                orphan_cuts = connection.execute(
+                    "SELECT line_number, filename_fold, split FROM cutoff_rows "
+                    "WHERE matched=0 ORDER BY line_number"
+                )
+                for line_number, filename, split in orphan_cuts:
+                    report.add_error(
+                        f"{CUTOFF_ANNOTATIONS_FILENAME} row {line_number}: "
+                        f"{split}/{filename} has no matching synthetic manifest row"
+                    )
+
             actual_image_count = int(connection.execute(
                 "SELECT COUNT(*) FROM actual_paths"
             ).fetchone()[0])
@@ -680,6 +791,20 @@ def validate_dataset(
                 },
                 "image_modes": modes,
             }
+            if has_cutoff_annotations:
+                samples, max_loss = connection.execute(
+                    "SELECT COUNT(*), MAX(ink_loss) FROM cutoff_rows"
+                ).fetchone()
+                by_side = {}
+                for side in CUTOFF_SIDE_NAMES:
+                    by_side[side] = int(connection.execute(
+                        f"SELECT COUNT(*) FROM cutoff_rows WHERE cut_{side} > 0"  # noqa: S608
+                    ).fetchone()[0])
+                report.statistics["cutoff"] = {
+                    "samples": int(samples),
+                    "by_side": by_side,
+                    "max_ink_loss": float(max_loss or 0.0),
+                }
         finally:
             connection.close()
 
@@ -689,7 +814,8 @@ def validate_dataset(
         report.images_sha256 = hash_dataset_images(dataset_dir, split_names)
 
     if write_artifacts:
-        if create_montage and montage_samples:
-            _write_montage(dataset_dir, montage_samples)
+        if create_montage and (montage_samples or montage_cut_samples):
+            _write_montage(dataset_dir, montage_samples,
+                           cut_samples=montage_cut_samples)
         atomic_write_json(dataset_dir / REPORT_FILENAME, report.as_dict())
     return report
