@@ -32,8 +32,9 @@ from src.augment import degrade, EDGE_CLIPPING_RANGES
 from src.generation_profiles import (AUGMENTATION_PROFILES,
                                      create_custom_augmentation_profile,
                                      get_augmentation_profile)
-from src.generate_synthetic import (GenerationCancelled, generate,
-                                    guarded_remove_dataset, zip_dataset)
+from src.generate_synthetic import (GenerationCancelled, field_weights_for_mode,
+                                    generate, guarded_remove_dataset,
+                                    zip_dataset)
 from src.generation_io import verify_sha256_sidecar
 from src.generation_resources import preflight_generation_resources
 from src.build_splits import build
@@ -101,6 +102,15 @@ if sys.stdout is None:
     sys.stdout = open(LOG_FILE.with_name("gui-stdout.log"), "a", encoding="utf-8")
 if sys.stderr is None:
     sys.stderr = open(LOG_FILE, "a", encoding="utf-8")
+
+
+def mode_field_weights(sample_mode: str) -> dict[str, int]:
+    """Weights for every supported field type, 0 for types the mode skips."""
+    weights = field_weights_for_mode(sample_mode)
+    return {
+        ftype: int(weights.get(ftype, 0))
+        for ftype in sorted(config.SUPPORTED_FIELD_TYPES)
+    }
 
 
 class RunOptionsError(ValueError):
@@ -195,8 +205,8 @@ class App(tk.Tk):
         self.split_val_var = tk.StringVar(value=str(int(config.SYNTH_VAL_FRAC * 100)))
         self.split_test_var = tk.StringVar(value=str(int(config.SYNTH_TEST_FRAC * 100)))
         self.field_weight_vars = {}
-        for ftype in sorted(config.SUPPORTED_FIELD_TYPES):
-            weight = config.FIELD_WEIGHTS.get(ftype, 1)
+        self._field_weights_mode = config.DEFAULT_SAMPLE_MODE
+        for ftype, weight in mode_field_weights(config.DEFAULT_SAMPLE_MODE).items():
             self.field_weight_vars[ftype] = tk.StringVar(value=str(weight))
         self.preset_var = tk.StringVar(value="")
 
@@ -701,10 +711,7 @@ class App(tk.Tk):
             cell = ttk.Frame(fw_grid, style="Card.TFrame")
             cell.grid(row=row_idx, column=col_idx, sticky="w", padx=3, pady=2)
             ttk.Label(cell, text=f"{ftype}:", style="CardHint.TLabel", width=12).pack(side="left")
-            var = self.field_weight_vars.get(ftype)
-            if var is None:
-                var = tk.StringVar(value=str(config.FIELD_WEIGHTS.get(ftype, 1)))
-                self.field_weight_vars[ftype] = var
+            var = self.field_weight_vars[ftype]
             e = ttk.Entry(cell, textvariable=var, width=4)
             e.pack(side="left")
             self._run_controls.append(e)
@@ -1188,7 +1195,28 @@ class App(tk.Tk):
 
     def _on_sample_mode_change(self, _event=None):
         self._sync_stroke_damage_state()
+        self._apply_mode_field_weights()
         self._update_preview()
+
+    def _grid_field_weights(self) -> dict[str, str]:
+        return {ftype: var.get().strip() for ftype, var in self.field_weight_vars.items()}
+
+    def _apply_mode_field_weights(self):
+        """Fill the weight grid with the current mode's mix.
+
+        Edits made for the previous mode are replaced, and the status line
+        says so.
+        """
+        mode = self._current_sample_mode()
+        previous = self.__dict__.get("_field_weights_mode", mode)
+        expected = {k: str(v) for k, v in mode_field_weights(previous).items()}
+        edited = self._grid_field_weights() != expected
+        self._reset_field_weights()
+        if edited and mode != previous and "status" in self.__dict__:
+            self.status.config(
+                text=(f"Field weights reset to the {config.SAMPLE_MODES[mode]} mix; "
+                      "your edits were replaced."),
+                foreground=WARNING)
 
     def _build_semi_broken_params(self):
         """Stroke damage params, or None outside semi-broken modes."""
@@ -1299,6 +1327,7 @@ class App(tk.Tk):
 
         self.sample_mode_var.set(config.SAMPLE_MODES[config.DEFAULT_SAMPLE_MODE])
         self._sync_stroke_damage_state()
+        self._apply_mode_field_weights()
         self.degradation_var.set(config.DEGRADATION_PROFILES[config.DEFAULT_DEGRADATION_PROFILE])
         self.edge_clipping_var.set(config.EDGE_CLIPPING_OPTIONS[config.DEFAULT_EDGE_CLIPPING])
         self.count_var.set(str(config.DEFAULT_COUNT))
@@ -1393,9 +1422,11 @@ class App(tk.Tk):
         self.est_target_lbl.config(text=f"dataset/datasets/{target_folder}")
 
     def _reset_field_weights(self):
-        for ftype, def_w in config.FIELD_WEIGHTS.items():
-            if ftype in self.field_weight_vars:
-                self.field_weight_vars[ftype].set(str(def_w))
+        """Reset the weight grid to the current sample mode's mix."""
+        mode = self._current_sample_mode()
+        for ftype, weight in mode_field_weights(mode).items():
+            self.field_weight_vars[ftype].set(str(weight))
+        self._field_weights_mode = mode
 
     def _update_split_sum_label(self, _event=None):
         if not hasattr(self, "split_sum_lbl"):

@@ -203,7 +203,7 @@ def _normalize_sample_mode(sample_mode: str | None) -> str:
     return sample_mode
 
 
-def _field_weights_for_mode(sample_mode: str) -> dict[str, int]:
+def field_weights_for_mode(sample_mode: str) -> dict[str, int]:
     """Field mix for regular and semi-broken generation modes."""
     if sample_mode == "regular":
         return dict(config.FIELD_WEIGHTS)
@@ -234,10 +234,13 @@ def _field_weights_for_mode(sample_mode: str) -> dict[str, int]:
     raise AssertionError(f"Unhandled sample mode: {sample_mode}")
 
 
+_field_weights_for_mode = field_weights_for_mode
+
+
 def _weighted_field_types(n: int, sample_mode: str, rng=None) -> list[str]:
     """Build a list of n field-type choices following the selected mode."""
     rng = random if rng is None else rng
-    mode_weights = _field_weights_for_mode(sample_mode)
+    mode_weights = field_weights_for_mode(sample_mode)
     types = list(mode_weights.keys())
     weights = list(mode_weights.values())
     return rng.choices(types, weights=weights, k=n)
@@ -625,7 +628,7 @@ def generate(count: int, dataset=None, seed: int = config.RANDOM_SEED,
             split_counts = config.allocate_split_counts(count, custom_split_fractions)
         else:
             split_counts = config.allocate_synthetic_split_counts(count)
-        field_weights = custom_field_weights if custom_field_weights is not None else _field_weights_for_mode(sample_mode)
+        field_weights = custom_field_weights if custom_field_weights is not None else field_weights_for_mode(sample_mode)
         counters = GenerationCounters()
         plan_items = list(iter_generation_plan(
             count,
