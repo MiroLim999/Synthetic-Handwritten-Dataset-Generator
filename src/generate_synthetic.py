@@ -62,17 +62,26 @@ from src.image_statistics import (compare_image_statistics, iter_image_paths,
 from src.generation_io import (AtomicCsvWriter, GenerationCounters,
                                SyntheticWriterAssigner, iter_generation_plan,
                                verify_sha256_sidecar, write_sha256_sidecar)
-from src.generation_profiles import (DEFAULT_AUGMENTATION_PROFILE_ID,
+from src.generation_profiles import (AUGMENTATION_PROFILES, CUTOFF_PROFILES,
+                                     DEFAULT_AUGMENTATION_PROFILE_ID,
                                      DEFAULT_WRITER_PROFILE_ID,
                                      CutoffProfile,
                                      StrokeDamageProfile,
                                      as_cutoff_profile,
                                      as_stroke_damage_profile,
+                                     augmentation_profile_from_spec,
+                                     augmentation_spec_from_profile,
+                                     cutoff_profile_from_spec,
+                                     cutoff_spec_from_profile,
                                      get_augmentation_profile,
                                      get_writer_style_profile,
                                      stroke_damage_from_config,
+                                     stroke_damage_from_spec,
+                                     stroke_damage_spec_from_profile,
                                      writer_style_for)
 from src.generation_resources import preflight_generation_resources
+from src.studio_recipe import (RECIPE_FILENAME, StudioRecipe, compose_settings,
+                               parse_recipe, save_recipe)
 from src.manifest import (MANIFEST_COLUMNS, MANIFEST_SCHEMA_VERSION,
                           RUN_METADATA_FILENAME)
 from src.path_safety import is_reparse_point, snapshot_regular_tree
@@ -106,11 +115,26 @@ GENERATOR_SOURCE_FILES = (
     "src/provenance.py",
     "src/render.py",
     "src/split_policy.py",
+    "src/studio_recipe.py",
     "src/studio_spec.py",
 )
 FORMAT_SOURCE_COLUMNS = (
     "filename", "field_type", "format_profile", "format_id",
 )
+
+
+AUGMENTATION_PROFILE_IDS = frozenset(AUGMENTATION_PROFILES)
+CUTOFF_PROFILE_IDS = frozenset(CUTOFF_PROFILES)
+
+
+class _FromRecipe:
+    """Default for generate() options that come from the recipe (or defaults)."""
+
+    def __repr__(self) -> str:
+        return "<from recipe or default>"
+
+
+FROM_RECIPE = _FromRecipe()
 
 
 class GenerationCancelled(RuntimeError):
@@ -395,6 +419,7 @@ def _run_metadata(*, seed: int, count: int, sample_mode: str,
                   writer_profile, augmentation_profile,
                   counters: GenerationCounters, writer_assigner,
                   cutoff_profile: CutoffProfile | None = None,
+                  studio_recipe: dict | None = None,
                   stroke_damage_profile: StrokeDamageProfile | None = None,
                   field_weights: dict | None = None,
                   split_fractions: tuple | None = None) -> dict:
@@ -445,6 +470,7 @@ def _run_metadata(*, seed: int, count: int, sample_mode: str,
             else stroke_damage_profile.to_metadata()
         ),
         "cutoff_profile": cutoff_profile.to_metadata(),
+        "studio_recipe": studio_recipe,
         "cutoff_annotations": (
             CUTOFF_ANNOTATIONS_FILENAME if has_cutoff_annotations else None
         ),
@@ -462,6 +488,65 @@ def _run_metadata(*, seed: int, count: int, sample_mode: str,
         "validation_report": REPORT_FILENAME,
         "real_merge": None,
     }
+
+
+def effective_recipe(*, name: str, description: str, augmentation_profile,
+                     stroke_damage_profile, cutoff_profile, sample_mode: str,
+                     field_weights: dict, split_fractions, font_style: str,
+                     cursive_group: str, specific_font: str, names_version: str,
+                     writer_profile, samples_per_writer: int) -> StudioRecipe:
+    """The fully resolved recipe a run used; re-running it reproduces the run."""
+    augmentation = augmentation_spec_from_profile(augmentation_profile)
+    if augmentation_profile.profile_id in AUGMENTATION_PROFILE_IDS:
+        augmentation["based_on"] = augmentation_profile.profile_id
+    cutoff = cutoff_spec_from_profile(cutoff_profile)
+    if cutoff_profile.profile_id in CUTOFF_PROFILE_IDS:
+        cutoff["based_on"] = cutoff_profile.profile_id
+    return parse_recipe({
+        "format": "synthetic-generator.studio-recipe",
+        "schema_version": 2,
+        "name": name,
+        "description": description,
+        "augmentation": augmentation,
+        "stroke_damage": stroke_damage_spec_from_profile(stroke_damage_profile),
+        "cutoff": cutoff,
+        "run": {
+            "sample_mode": sample_mode,
+            "field_weights": {
+                key: value for key, value in sorted(field_weights.items()) if value
+            },
+            "split_fractions": list(split_fractions),
+            "font_style": font_style,
+            "cursive_group": cursive_group,
+            "specific_font": specific_font,
+            "names_version": names_version,
+            "writer_profile": writer_profile.profile_id,
+            "samples_per_writer": samples_per_writer,
+        },
+    })
+
+
+def _recipe_modified(source: StudioRecipe | None, effective: StudioRecipe) -> bool:
+    """Whether the run differs from the sections its source recipe sets."""
+    if source is None:
+        return False
+    for section in source.sections:
+        wanted = source.section(section)
+        actual = effective.section(section)
+        wanted.pop("based_on", None)
+        actual.pop("based_on", None)
+        if section != "run":
+            if wanted != actual:
+                return True
+            continue
+        for key, value in wanted.items():
+            if key == "field_weights":
+                if value is None:
+                    continue
+                value = {k: v for k, v in sorted(value.items()) if v}
+            if actual.get(key) != value:
+                return True
+    return False
 
 
 def _write_evaluation_annotations_streaming(
@@ -556,28 +641,59 @@ def _write_image_statistics_artifact(dataset_dir: Path) -> None:
 
 
 def generate(count: int, dataset=None, seed: int = config.RANDOM_SEED,
-             names_version: str = None,
-             sample_mode: str = config.DEFAULT_SAMPLE_MODE,
-             font_style: str = FONT_STYLE_ALL,
-             cursive_group: str = "",
-             specific_font: str = "",
+             names_version: str | None = FROM_RECIPE,
+             sample_mode: str = FROM_RECIPE,
+             font_style: str = FROM_RECIPE,
+             cursive_group: str = FROM_RECIPE,
+             specific_font: str = FROM_RECIPE,
              progress_callback=None, show_bar: bool = True,
              cancel_event=None, archive_planned: bool = False,
-             writer_profile=DEFAULT_WRITER_PROFILE_ID,
-             augmentation_profile=DEFAULT_AUGMENTATION_PROFILE_ID,
-             samples_per_writer: int = 32,
-             edge_clipping: str | CutoffProfile | tuple | None = "none",
+             writer_profile=FROM_RECIPE,
+             augmentation_profile=FROM_RECIPE,
+             samples_per_writer: int = FROM_RECIPE,
+             edge_clipping: str | CutoffProfile | tuple | None = FROM_RECIPE,
              semi_broken_params: dict | StrokeDamageProfile | None = None,
              custom_field_weights: dict[str, int] | None = None,
              custom_split_fractions: tuple[float, float, float] | None = None,
              workers: int | None = None,
-             stroke_damage_profile: StrokeDamageProfile | None = None):
+             stroke_damage_profile: StrokeDamageProfile | None = None,
+             recipe: StudioRecipe | dict | None = None,
+             recipe_source: str | None = None):
     """Generate synthetic samples into a numbered dataset folder.
+
+    ``recipe`` supplies resolved sections (a :class:`StudioRecipe` or recipe
+    dict); every keyword argument passed explicitly overrides it, and
+    anything neither sets takes the built-in default.  ``recipe_source``
+    names the preset it came from, for provenance.
 
     ``stroke_damage_profile`` tunes semi-broken damage; ``semi_broken_params``
     is the older alias and also accepts the legacy GUI dict.  Neither has
-    any effect outside semi-broken modes.
+    any effect outside semi-broken modes.  The run's effective recipe is
+    written to ``studio-recipe.json``.
     """
+    if recipe is not None and not isinstance(recipe, StudioRecipe):
+        recipe = parse_recipe(recipe)
+    settings = compose_settings(recipe)
+    run = settings["run"]
+
+    def chosen(value, key):
+        return run[key] if value is FROM_RECIPE else value
+
+    names_version = chosen(names_version, "names_version")
+    sample_mode = chosen(sample_mode, "sample_mode")
+    font_style = chosen(font_style, "font_style")
+    cursive_group = chosen(cursive_group, "cursive_group")
+    specific_font = chosen(specific_font, "specific_font")
+    writer_profile = chosen(writer_profile, "writer_profile")
+    samples_per_writer = chosen(samples_per_writer, "samples_per_writer")
+    if custom_field_weights is None and run["field_weights"] is not None:
+        custom_field_weights = dict(run["field_weights"])
+    if custom_split_fractions is None:
+        custom_split_fractions = tuple(run["split_fractions"])
+    if augmentation_profile is FROM_RECIPE:
+        augmentation_profile = augmentation_profile_from_spec(settings["augmentation"])
+    if edge_clipping is FROM_RECIPE:
+        edge_clipping = cutoff_profile_from_spec(settings["cutoff"])
     sample_mode, names_dir = _preflight_generation(
         count,
         names_version,
@@ -606,11 +722,14 @@ def generate(count: int, dataset=None, seed: int = config.RANDOM_SEED,
     if stroke_damage_profile is not None and semi_broken_params is not None:
         raise ValueError(
             "Pass stroke_damage_profile or its alias semi_broken_params, not both")
-    stroke_damage_profile = (
-        as_stroke_damage_profile(
+    if stroke_damage_profile is None and semi_broken_params is None:
+        resolved_stroke_damage = stroke_damage_from_spec(settings["stroke_damage"])
+    else:
+        resolved_stroke_damage = as_stroke_damage_profile(
             semi_broken_params if stroke_damage_profile is None
             else stroke_damage_profile)
-        if sample_mode.startswith("semi_broken") else None
+    stroke_damage_profile = (
+        resolved_stroke_damage if sample_mode.startswith("semi_broken") else None
     )
     writer_assigner = SyntheticWriterAssigner(samples_per_writer=samples_per_writer)
     resource_estimate = preflight_generation_resources(
@@ -858,6 +977,23 @@ def generate(count: int, dataset=None, seed: int = config.RANDOM_SEED,
             evaluation_policy,
         )
         format_source_path.unlink()
+        run_recipe = effective_recipe(
+            name=recipe.name if recipe is not None else "",
+            description=recipe.description if recipe is not None else "",
+            augmentation_profile=augmentation_profile,
+            stroke_damage_profile=resolved_stroke_damage,
+            cutoff_profile=cutoff_profile,
+            sample_mode=sample_mode,
+            field_weights=field_weights,
+            split_fractions=split_fractions,
+            font_style=font_style,
+            cursive_group=cursive_group,
+            specific_font=specific_font,
+            names_version=names_dir.name,
+            writer_profile=writer_profile,
+            samples_per_writer=writer_assigner.samples_per_writer,
+        )
+        save_recipe(staging_dir / RECIPE_FILENAME, run_recipe)
         validation_report = validate_dataset(staging_dir, expected_count=count)
         validation_report.raise_for_errors()
         _write_image_statistics_artifact(staging_dir)
@@ -883,6 +1019,13 @@ def generate(count: int, dataset=None, seed: int = config.RANDOM_SEED,
                 counters=counters,
                 writer_assigner=writer_assigner,
                 cutoff_profile=cutoff_profile,
+                studio_recipe={
+                    "file": RECIPE_FILENAME,
+                    "sha256": sha256_file(staging_dir / RECIPE_FILENAME),
+                    "name": run_recipe.name,
+                    "source_preset": recipe_source,
+                    "modified": _recipe_modified(recipe, run_recipe),
+                },
                 stroke_damage_profile=stroke_damage_profile,
                 field_weights={
                     key: value for key, value in sorted(field_weights.items())
@@ -1114,6 +1257,10 @@ def _validate_zip_archive(
             cutoff_annotations_content=(
                 archive.read(archived_files[CUTOFF_ANNOTATIONS_FILENAME])
                 if CUTOFF_ANNOTATIONS_FILENAME in archived_files else None
+            ),
+            studio_recipe_content=(
+                archive.read(archived_files[RECIPE_FILENAME])
+                if RECIPE_FILENAME in archived_files else None
             ),
         )
 

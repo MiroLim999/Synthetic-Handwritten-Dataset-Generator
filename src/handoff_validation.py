@@ -14,6 +14,10 @@ from src.fields import BASE_FORMAT_PROFILE
 from src.manifest import MANIFEST_COLUMNS, MANIFEST_SCHEMA_VERSION
 from src.split_policy import EVALUATION_ANNOTATION_COLUMNS
 
+# Mirrors src.studio_recipe.RECIPE_FILENAME without importing the recipe
+# machinery into this notebook-contract module.
+RECIPE_FILENAME = "studio-recipe.json"
+
 
 # Format IDs src.fields emits for base-profile, non-date fields.  Mirrors
 # LEGACY_NON_DATE_FORMAT_ID_ALLOWLIST in kaggle-code/trocr-finetuning-code2.ipynb.
@@ -64,6 +68,7 @@ def validate_handoff_bytes(
     manifest_sha256: str,
     images_sha256: str,
     cutoff_annotations_content: bytes | None = None,
+    studio_recipe_content: bytes | None = None,
 ) -> None:
     """Require provenance and synthetic annotations to match current bytes.
 
@@ -125,6 +130,18 @@ def validate_handoff_bytes(
     elif cutoff_annotations_content is not None:
         raise ValueError(
             f"run-metadata.json does not identify {CUTOFF_ANNOTATIONS_FILENAME}")
+
+    named_recipe = metadata.get("studio_recipe")
+    if named_recipe is not None:
+        if (not isinstance(named_recipe, Mapping)
+                or named_recipe.get("file") != RECIPE_FILENAME):
+            raise ValueError("run-metadata.json names an unexpected studio recipe")
+        if studio_recipe_content is None:
+            raise ValueError(f"Missing {RECIPE_FILENAME} named by run-metadata.json")
+        if named_recipe.get("sha256") != hashlib.sha256(studio_recipe_content).hexdigest():
+            raise ValueError("run-metadata.json is stale: studio recipe hash mismatch")
+    elif studio_recipe_content is not None:
+        raise ValueError(f"run-metadata.json does not identify {RECIPE_FILENAME}")
 
     policy = metadata.get("evaluation_policy")
     if not isinstance(policy, Mapping) or policy.get("policy_version") != "1":
@@ -260,8 +277,11 @@ def validate_handoff_files(
             raise FileNotFoundError(f"Missing required Kaggle handoff artifact: {path}")
         content[argument] = path.read_bytes()
     cutoff_path = dataset_dir / CUTOFF_ANNOTATIONS_FILENAME
+    recipe_path = dataset_dir / RECIPE_FILENAME
     validate_handoff_bytes(
         **content,
+        studio_recipe_content=(
+            recipe_path.read_bytes() if recipe_path.is_file() else None),
         cutoff_annotations_content=(
             cutoff_path.read_bytes() if cutoff_path.is_file() else None),
         manifest_sha256=manifest_sha256,

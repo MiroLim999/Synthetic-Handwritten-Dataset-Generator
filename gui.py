@@ -284,6 +284,8 @@ class RunOptions:
     workers: int | None
     writer_profile: str = DEFAULT_WRITER_PROFILE_ID
     samples_per_writer: int = 32
+    recipe: StudioRecipe | None = None
+    recipe_source: str | None = None
 
 
 def _open_path_portably(path: Path, *, select_file: bool = False) -> None:
@@ -1682,6 +1684,8 @@ class App(tk.Tk):
         finally:
             self._slider_updating = False
         self._recipe_sections = overrides
+        self._loaded_recipe = recipe
+        self._loaded_recipe_key = name
         self._sync_stroke_damage_state()
         self._update_preview()
         sections = ", ".join(recipe.sections) or "no sections"
@@ -2369,6 +2373,8 @@ class App(tk.Tk):
             writer_profile=self.__dict__.get(
                 "_run_writer_profile", DEFAULT_WRITER_PROFILE_ID),
             samples_per_writer=self.__dict__.get("_run_samples_per_writer", 32),
+            recipe=self.__dict__.get("_loaded_recipe"),
+            recipe_source=self.__dict__.get("_loaded_recipe_key"),
         )
 
     def start(self):
@@ -2408,7 +2414,8 @@ class App(tk.Tk):
                   options.augmentation_profile, options.edge_clipping,
                   options.stroke_damage_profile, options.custom_field_weights,
                   options.custom_split_fractions, options.workers,
-                  options.writer_profile, options.samples_per_writer),
+                  options.writer_profile, options.samples_per_writer,
+                  options.recipe, options.recipe_source),
             daemon=False)
         self.worker.start()
 
@@ -2425,7 +2432,9 @@ class App(tk.Tk):
              custom_split_fractions=None,
              workers=None,
              writer_profile=DEFAULT_WRITER_PROFILE_ID,
-             samples_per_writer=32):
+             samples_per_writer=32,
+             recipe=None,
+             recipe_source=None):
         try:
             def cb(done, total, field_type):
                 self.q.put(("progress", done, total, field_type))
@@ -2444,7 +2453,9 @@ class App(tk.Tk):
                                custom_split_fractions=custom_split_fractions,
                                workers=workers,
                                writer_profile=writer_profile,
-                               samples_per_writer=samples_per_writer)
+                               samples_per_writer=samples_per_writer,
+                               recipe=recipe,
+                               recipe_source=recipe_source)
             if cancel_event.is_set():
                 self.q.put(("cancelled", "Generation cancelled safely."))
                 return
