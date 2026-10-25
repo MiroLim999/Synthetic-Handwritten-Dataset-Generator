@@ -273,46 +273,6 @@ def _semi_broken(img: Image.Image, rng=None,
     return img
 
 
-EDGE_CLIPPING_RANGES: dict[str, tuple[float, float]] = {
-    "none": (0.00, 0.00),
-    "light": (0.01, 0.02),
-    "moderate": (0.03, 0.05),
-    "heavy": (0.06, 0.09),
-}
-
-
-def _clip_edges(img: Image.Image, level: str | tuple[float, float, float, float] = "none", rng=None) -> Image.Image:
-    """Crop edges of the image to mimic tight boundary cuts on handwriting."""
-    rng = _python_rng(rng)
-    if isinstance(level, tuple) and len(level) == 4:
-        top_p, bottom_p, left_p, right_p = (max(0.0, float(v)) for v in level)
-        w, h = img.size
-        top_crop = int(round(h * top_p))
-        bottom_crop = int(round(h * bottom_p))
-        left_crop = int(round(w * left_p))
-        right_crop = int(round(w * right_p))
-    else:
-        frac_range = EDGE_CLIPPING_RANGES.get(str(level), (0.0, 0.0))
-        if frac_range[1] <= 0:
-            return img
-
-        w, h = img.size
-        top_crop = int(round(h * rng.uniform(*frac_range)))
-        bottom_crop = int(round(h * rng.uniform(*frac_range)))
-        left_crop = int(round(w * rng.uniform(*frac_range)))
-        right_crop = int(round(w * rng.uniform(*frac_range)))
-
-    if top_crop <= 0 and bottom_crop <= 0 and left_crop <= 0 and right_crop <= 0:
-        return img
-
-    left = min(left_crop, max(0, w - 10))
-    top = min(top_crop, max(0, h - 10))
-    right = max(left + 10, w - right_crop)
-    bottom = max(top + 10, h - bottom_crop)
-
-    return img.crop((left, top, right, bottom))
-
-
 @dataclass(frozen=True)
 class DegradeResult:
     """The degraded image and the character cut applied to it."""

@@ -30,8 +30,10 @@ import random
 
 import config
 from src import fields
-from src.augment import degrade, EDGE_CLIPPING_RANGES
-from src.generation_profiles import (AUGMENTATION_PROFILES,
+from src import studio_spec
+from src.augment import degrade
+from src.generation_profiles import (AUGMENTATION_PROFILES, CUTOFF_PROFILES,
+                                     CutoffProfile, as_cutoff_profile,
                                      StrokeDamageProfile,
                                      augmentation_profile_from_spec,
                                      augmentation_spec_from_legacy_values,
@@ -95,11 +97,16 @@ DEGRADATION_SLIDER_SPECS = (
     SliderSpec("scanline", "Scanlines", 0.0, 30.0, 10.0, 1.0),
     SliderSpec("jpeg", "JPEG quality", 20.0, 100.0, 75.0, 1.0),
 )
-CROP_SLIDER_SPECS = (
-    SliderSpec("crop_top", "Top cut", 0.0, 15.0, 0.0, 1.0, "%"),
-    SliderSpec("crop_bottom", "Bottom cut", 0.0, 15.0, 0.0, 1.0, "%"),
-    SliderSpec("crop_left", "Left cut", 0.0, 15.0, 0.0, 1.0, "%"),
-    SliderSpec("crop_right", "Right cut", 0.0, 15.0, 0.0, 1.0, "%"),
+# Custom cutoff sliders: percent of the ink box, ranges from studio_spec.
+CROP_SLIDER_SPECS = tuple(
+    SliderSpec(
+        f"crop_{side}",
+        f"{side.title()} cut - % of "
+        f"{'letter height' if side in ('top', 'bottom') else 'word width'}",
+        0.0, studio_spec.PARAMS_BY_PATH[f"cutoff.{side}.range"].high * 100.0,
+        0.0, 1.0, "%",
+    )
+    for side in studio_spec.CUTOFF_SIDES
 )
 STROKE_SLIDER_SPECS = (
     SliderSpec("contrast", "Contrast-drop chance", 0.00, 1.00, 0.80, 0.01),
@@ -113,7 +120,7 @@ SLIDER_SPECS = {
     for spec in (*DEGRADATION_SLIDER_SPECS, *CROP_SLIDER_SPECS, *STROKE_SLIDER_SPECS)
 }
 STROKE_DAMAGE_SLIDERS = tuple(spec.name for spec in STROKE_SLIDER_SPECS)
-SLIDER_LABEL_WIDTH = 20
+SLIDER_LABEL_WIDTH = 30
 
 
 def _step_decimals(step: float) -> int:
@@ -299,7 +306,7 @@ class RunOptions:
     cursive_group: str
     specific_font: str
     augmentation_profile: object
-    edge_clipping: object
+    edge_clipping: CutoffProfile
     stroke_damage_profile: StrokeDamageProfile | None
     merge_real: bool
     package_zip: bool
@@ -1313,7 +1320,7 @@ class App(tk.Tk):
             return
 
         profile = self._build_custom_developer_profile()
-        crop_tuple = self._get_custom_crop_tuple()
+        cutoff_profile = self._build_cutoff_profile()
         stroke_damage = self._build_stroke_damage_profile()
         sample_mode_key = self._current_sample_mode()
         damage_prof = "semi_broken" if sample_mode_key.startswith("semi_broken") else "regular"
@@ -1322,7 +1329,7 @@ class App(tk.Tk):
                 img,
                 damage_profile=damage_prof,
                 augmentation_profile=profile,
-                edge_clipping=crop_tuple,
+                edge_clipping=cutoff_profile,
                 semi_broken_params=stroke_damage,
                 rng=random.Random(seed),
             )
@@ -1419,22 +1426,17 @@ class App(tk.Tk):
             jpeg_quality=int(round(self.dev_sliders["jpeg"].get())),
         ))
 
-    def _get_custom_crop_tuple(self):
-        if not hasattr(self, "dev_sliders"):
-            preset_key = self.clipping_by_label.get(self.edge_clipping_var.get(), "none")
-            return preset_key
+    def _build_cutoff_profile(self):
+        """The selected cutoff profile.
 
-        preset_key = self.clipping_by_label.get(self.edge_clipping_var.get(), "")
-        if preset_key and preset_key != "custom":
-            return preset_key
-
-        top_p = self.dev_sliders["crop_top"].get() / 100.0
-        bottom_p = self.dev_sliders["crop_bottom"].get() / 100.0
-        left_p = self.dev_sliders["crop_left"].get() / 100.0
-        right_p = self.dev_sliders["crop_right"].get() / 100.0
-        if top_p <= 0 and bottom_p <= 0 and left_p <= 0 and right_p <= 0:
-            return "none"
-        return (top_p, bottom_p, left_p, right_p)
+        Custom sliders give each nonzero side chance 1.0 and min = max, as a
+        fraction of the ink box (interim; ranges arrive with the studio UI).
+        """
+        preset_key = self.clipping_by_label.get(self.edge_clipping_var.get(), "none")
+        if preset_key in CUTOFF_PROFILES or not hasattr(self, "dev_sliders"):
+            return CUTOFF_PROFILES.get(preset_key, CUTOFF_PROFILES["none"])
+        return as_cutoff_profile(tuple(
+            self.dev_sliders[spec.name].get() / 100.0 for spec in CROP_SLIDER_SPECS))
 
     @staticmethod
     def _profile_slider_values(profile_key: str) -> dict[str, float]:
@@ -1487,14 +1489,15 @@ class App(tk.Tk):
     def _on_clipping_preset_change(self, _event=None):
         preset_label = self.edge_clipping_var.get()
         preset_key = self.clipping_by_label.get(preset_label, "none")
-        if preset_key in EDGE_CLIPPING_RANGES and hasattr(self, "dev_sliders"):
-            r = EDGE_CLIPPING_RANGES[preset_key]
-            avg_pct = round(((r[0] + r[1]) / 2.0) * 100.0)
-            self._slider_updating = True
-            for side in ("crop_top", "crop_bottom", "crop_left", "crop_right"):
-                self.dev_sliders[side].set(avg_pct)
-                self.dev_labels[side].set(self._slider_text(side, avg_pct))
-            self._slider_updating = False
+        if preset_key in CUTOFF_PROFILES and hasattr(self, "dev_sliders"):
+            # Interim: show each side's range midpoint (0 for sides never cut).
+            profile = CUTOFF_PROFILES[preset_key]
+            self._set_slider_values({
+                f"crop_{name}": (
+                    (side.fraction_range[0] + side.fraction_range[1]) / 2.0 * 100.0
+                    if side.active else 0.0)
+                for name, side in profile.sides()
+            })
         self._update_preview()
 
     def _on_developer_slider_change(self, slider_name=""):
@@ -2284,7 +2287,7 @@ class App(tk.Tk):
             cursive_group=cursive_group,
             specific_font=specific_font,
             augmentation_profile=self._build_custom_developer_profile(),
-            edge_clipping=self._get_custom_crop_tuple(),
+            edge_clipping=self._build_cutoff_profile(),
             stroke_damage_profile=self._build_stroke_damage_profile(),
             merge_real=bool(self.real_var.get()),
             package_zip=bool(self.zip_var.get()),
