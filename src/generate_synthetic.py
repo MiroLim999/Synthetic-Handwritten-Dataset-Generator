@@ -581,7 +581,6 @@ def generate(count: int, dataset=None, seed: int = config.RANDOM_SEED,
     )
     evaluation_policy = build_synthetic_evaluation_policy(effective_fonts, seed)
     rng = random.Random(seed)
-    np_rng = np.random.default_rng(seed)
     generation_started_at = utc_now_iso()
 
     reservation = None

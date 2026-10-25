@@ -22,3 +22,6 @@ htmlcov/
 .venv/
 venv/
 .DS_Store
+
+# local GUI logs
+logs/
