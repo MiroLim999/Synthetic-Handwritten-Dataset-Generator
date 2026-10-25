@@ -15,6 +15,7 @@ import subprocess
 import traceback
 import webbrowser
 import tkinter as tk
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from tkinter import ttk, messagebox, simpledialog
@@ -99,6 +100,36 @@ if sys.stdout is None:
     sys.stdout = open(LOG_FILE.with_name("gui-stdout.log"), "a", encoding="utf-8")
 if sys.stderr is None:
     sys.stderr = open(LOG_FILE, "a", encoding="utf-8")
+
+
+class RunOptionsError(ValueError):
+    """Invalid GUI input, carrying the title of the dialog that reports it."""
+
+    def __init__(self, title: str, message: str):
+        super().__init__(message)
+        self.title = title
+
+
+@dataclass(frozen=True)
+class RunOptions:
+    """Plain-value snapshot of every Tk-backed option a generation run uses."""
+
+    count: int
+    dataset: str | None
+    seed: int
+    names_version: str | None
+    sample_mode: str
+    font_style: str
+    cursive_group: str
+    specific_font: str
+    augmentation_profile: object
+    edge_clipping: object
+    semi_broken_params: dict | None
+    merge_real: bool
+    package_zip: bool
+    custom_field_weights: dict | None
+    custom_split_fractions: tuple | None
+    workers: int | None
 
 
 def _open_path_portably(path: Path, *, select_file: bool = False) -> None:
@@ -1914,24 +1945,17 @@ class App(tk.Tk):
     # ------------------------------------------------------------------
     # Start generation
     # ------------------------------------------------------------------
-    def start(self):
-        if self._any_worker_is_alive():
-            return
+    def _snapshot_run_options(self) -> RunOptions:
+        """Collect and validate every run option on the UI thread.
+
+        The worker receives these plain Python values and never calls Tk while
+        it is running.  Invalid input raises :class:`RunOptionsError`.
+        """
         try:
             count = int(self.count_var.get().replace(",", "").strip())
             config.validate_config(count)
         except (TypeError, ValueError) as exc:
-            messagebox.showerror("Invalid input", str(exc))
-            return
-        warning_count = getattr(config, "LARGE_GENERATION_WARNING_COUNT", None)
-        if warning_count is not None and count >= warning_count:
-            if not messagebox.askyesno(
-                "Large generation job",
-                f"Generate {count:,} samples? This may require substantial disk "
-                "space and time.",
-                icon="warning",
-            ):
-                return
+            raise RunOptionsError("Invalid input", str(exc)) from exc
         raw_seed = self.seed_var.get().strip()
         if not raw_seed:
             seed = random.randint(1, 2_147_483_647)
@@ -1939,11 +1963,9 @@ class App(tk.Tk):
             try:
                 seed = int(raw_seed)
             except ValueError:
-                messagebox.showerror("Invalid input", "Seed must be a whole number.")
-                return
+                raise RunOptionsError(
+                    "Invalid input", "Seed must be a whole number.") from None
 
-        # Snapshot every Tk-backed option on the UI thread. The worker receives
-        # plain Python values and never calls Tk while it is running.
         dataset = self.dataset_var.get().strip()
         if dataset in ("", "(next)"):
             dataset = None
@@ -1951,29 +1973,25 @@ class App(tk.Tk):
         sample_mode = self.mode_by_label.get(
             self.sample_mode_var.get(), config.DEFAULT_SAMPLE_MODE)
         font_style, cursive_group, specific_font = self._current_font_selection()
-        augmentation_profile = self._build_custom_developer_profile()
-        edge_clipping = self._get_custom_crop_tuple()
-        semi_broken_params = self._build_semi_broken_params()
-        merge_real = bool(self.real_var.get())
-        package_zip = bool(self.zip_var.get())
 
-        # Extract custom split fractions
         custom_split_fractions = None
         if hasattr(self, "split_train_var"):
             try:
                 tr_pct = float(self.split_train_var.get())
                 val_pct = float(self.split_val_var.get())
                 te_pct = float(self.split_test_var.get())
-                total_pct = tr_pct + val_pct + te_pct
-                if abs(total_pct - 100.0) > 0.01 or tr_pct < 0 or val_pct < 0 or te_pct < 0:
-                    messagebox.showerror("Invalid split ratios", "Train, Val, and Test split percentages must be non-negative and sum to 100%.")
-                    return
-                custom_split_fractions = (tr_pct / 100.0, val_pct / 100.0, te_pct / 100.0)
             except ValueError:
-                messagebox.showerror("Invalid split ratios", "Split ratios must be valid numbers.")
-                return
+                raise RunOptionsError(
+                    "Invalid split ratios", "Split ratios must be valid numbers."
+                ) from None
+            total_pct = tr_pct + val_pct + te_pct
+            if abs(total_pct - 100.0) > 0.01 or tr_pct < 0 or val_pct < 0 or te_pct < 0:
+                raise RunOptionsError(
+                    "Invalid split ratios",
+                    "Train, Val, and Test split percentages must be non-negative "
+                    "and sum to 100%.")
+            custom_split_fractions = (tr_pct / 100.0, val_pct / 100.0, te_pct / 100.0)
 
-        # Extract custom field weights
         custom_field_weights = None
         if hasattr(self, "field_weight_vars") and self.field_weight_vars:
             try:
@@ -1983,14 +2001,15 @@ class App(tk.Tk):
                     if w < 0:
                         raise ValueError(f"Weight for {ftype} cannot be negative.")
                     custom_field_weights[ftype] = w
-                if not any(v > 0 for v in custom_field_weights.values()):
-                    messagebox.showerror("Invalid field weights", "At least one field weight must be greater than zero.")
-                    return
             except ValueError as exc:
-                messagebox.showerror("Invalid field weights", f"Field weights must be non-negative integers: {exc}")
-                return
+                raise RunOptionsError(
+                    "Invalid field weights",
+                    f"Field weights must be non-negative integers: {exc}") from None
+            if not any(v > 0 for v in custom_field_weights.values()):
+                raise RunOptionsError(
+                    "Invalid field weights",
+                    "At least one field weight must be greater than zero.")
 
-        # Extract custom workers count
         workers_count = None
         if hasattr(self, "workers_var"):
             w_str = self.workers_var.get().strip()
@@ -2000,23 +2019,62 @@ class App(tk.Tk):
                 except ValueError:
                     workers_count = None
 
+        return RunOptions(
+            count=count,
+            dataset=dataset,
+            seed=seed,
+            names_version=names_version,
+            sample_mode=sample_mode,
+            font_style=font_style,
+            cursive_group=cursive_group,
+            specific_font=specific_font,
+            augmentation_profile=self._build_custom_developer_profile(),
+            edge_clipping=self._get_custom_crop_tuple(),
+            semi_broken_params=self._build_semi_broken_params(),
+            merge_real=bool(self.real_var.get()),
+            package_zip=bool(self.zip_var.get()),
+            custom_field_weights=custom_field_weights,
+            custom_split_fractions=custom_split_fractions,
+            workers=workers_count,
+        )
+
+    def start(self):
+        if self._any_worker_is_alive():
+            return
+        try:
+            options = self._snapshot_run_options()
+        except RunOptionsError as exc:
+            messagebox.showerror(exc.title, str(exc))
+            return
+        warning_count = getattr(config, "LARGE_GENERATION_WARNING_COUNT", None)
+        if warning_count is not None and options.count >= warning_count:
+            if not messagebox.askyesno(
+                "Large generation job",
+                f"Generate {options.count:,} samples? This may require substantial disk "
+                "space and time.",
+                icon="warning",
+            ):
+                return
+
         self.cancel_event.clear()
         self._pending_terminal = None
         self._set_job_active(True)
         self.open_btn.config(state="disabled")
         self._last_output = None
-        self.progress.config(maximum=count, value=0)
+        self.progress.config(maximum=options.count, value=0)
         self.status.config(text="Starting…", foreground=WARNING)
         self.timer.config(text="")
         self.start_time = time.time()
 
         self.worker = threading.Thread(
             target=self._run,
-            args=(count, dataset, seed, names_version, sample_mode,
-                  font_style, cursive_group, specific_font,
-                  merge_real, package_zip, self.cancel_event,
-                  augmentation_profile, edge_clipping, semi_broken_params,
-                  custom_field_weights, custom_split_fractions, workers_count),
+            args=(options.count, options.dataset, options.seed,
+                  options.names_version, options.sample_mode,
+                  options.font_style, options.cursive_group, options.specific_font,
+                  options.merge_real, options.package_zip, self.cancel_event,
+                  options.augmentation_profile, options.edge_clipping,
+                  options.semi_broken_params, options.custom_field_weights,
+                  options.custom_split_fractions, options.workers),
             daemon=False)
         self.worker.start()
 
