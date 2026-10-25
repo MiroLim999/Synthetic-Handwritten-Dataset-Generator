@@ -602,6 +602,7 @@ class StudioPanel(ttk.Frame):
 TILE_CHOICES = (6, 9, 12)
 TILE_COLUMNS = 3
 TILE_MAX_SIZE = (300, 120)
+BEFORE_AFTER_SIZE = (560, 220)
 SPLIT_CHOICES = ("All splits", "train", "val", "test")
 
 
@@ -723,10 +724,37 @@ class PreviewGrid(ttk.Frame):
                 continue
             photo = ImageTk.PhotoImage(fit_tile(tile.image.convert("RGB")))
             self._photos.append(photo)
-            tk.Label(cell, image=photo, bg=self._background).pack(padx=4, pady=(4, 2))
+            image_label = tk.Label(cell, image=photo, bg=self._background, cursor="hand2")
+            image_label.pack(padx=4, pady=(4, 2))
+            image_label.bind("<Button-1>", lambda _event, tile=tile: self.show_before_after(tile))
             tk.Label(cell, text=tile_badges(tile), bg=self._background, fg="#7a8194",
-                     justify="left", font=("Segoe UI", 8)).pack(anchor="w", padx=4,
-                                                               pady=(0, 4))
+                     justify="left", font=("Segoe UI", 8)).pack(anchor="w", padx=4)
+            ttk.Button(cell, text="Before / after", style="Quick.TButton",
+                       command=lambda tile=tile: self.show_before_after(tile)).pack(
+                anchor="w", padx=4, pady=(2, 4))
+
+    def show_before_after(self, tile) -> tk.Toplevel | None:
+        """Side by side: the clean render and the final image for one tile."""
+        if tile.image is None or tile.clean_image is None:
+            return None
+        window = tk.Toplevel(self)
+        window.title(f"Before / after - {tile.path}")
+        window.configure(bg=self._background)
+        window.transient(self.winfo_toplevel())
+        photos = []
+        for column, (caption, image) in enumerate((
+                ("Before: clean render", tile.clean_image),
+                (f"After: {tile.path} (kept on attempt {tile.attempts})", tile.image))):
+            photo = ImageTk.PhotoImage(fit_tile(image.convert("RGB"), BEFORE_AFTER_SIZE))
+            photos.append(photo)
+            tk.Label(window, image=photo, bg=self._background).grid(
+                row=0, column=column, padx=10, pady=(10, 4))
+            tk.Label(window, text=caption, bg=self._background, fg="#7a8194",
+                     font=("Segoe UI", 9)).grid(row=1, column=column, padx=10, pady=(0, 10))
+        window.photos = photos  # keep references alive
+        window.bind("<Escape>", lambda _event: window.destroy())
+        window.focus_set()
+        return window
 
     def show_error(self, message: str) -> None:
         self._clear()
