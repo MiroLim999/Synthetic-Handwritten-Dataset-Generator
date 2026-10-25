@@ -811,8 +811,11 @@ def generate(count: int, dataset=None, seed: int = config.RANDOM_SEED,
                             pending_futures[next_fut] = next_id
                         except StopIteration:
                             pass
-            except Exception:
-                executor.shutdown(wait=False, cancel_futures=True)
+            except BaseException:
+                # Cancel queued work but let in-flight samples finish, so no
+                # worker is still writing into the staging folder while the
+                # finally block removes it.
+                executor.shutdown(wait=True, cancel_futures=True)
                 raise
             else:
                 executor.shutdown(wait=True)
