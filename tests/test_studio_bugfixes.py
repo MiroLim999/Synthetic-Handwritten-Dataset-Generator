@@ -18,6 +18,7 @@ import config
 import gui
 from src.augment import degrade
 from src.generate_synthetic import field_weights_for_mode, generate
+from src import studio_recipe
 from src.generation_profiles import StrokeDamageProfile
 from src.generation_io import iter_generation_plan
 from tests.studio_fakes import studio_app
@@ -197,15 +198,17 @@ class PresetSavingTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             folder = Path(temporary) / "presets"
             folder.mkdir()
-            for name in ("a/b", "..\\x", "con", ":x", "   ", ""):
+            (folder / "builtin.json").write_text("{}", encoding="utf-8")
+            for name in ("a/b", "..\\x", "con", ":x", "   ", "", "Builtin"):
                 showerror = self._save(studio_app(), folder, name)
                 showerror.assert_called_once()
-            self.assertEqual(list(folder.iterdir()), [])
+            self.assertEqual([p.name for p in folder.iterdir()], ["builtin.json"])
 
     def test_declined_overwrite_leaves_file_unchanged(self):
         with tempfile.TemporaryDirectory() as temporary:
             folder = Path(temporary)
-            existing = folder / "my_preset.json"
+            (folder / "user").mkdir()
+            existing = folder / "user" / "my_preset.json"
             existing.write_text('{"name": "original"}', encoding="utf-8")
             self._save(studio_app(), folder, "My Preset", overwrite=False)
             self.assertEqual(existing.read_text(encoding="utf-8"), '{"name": "original"}')
@@ -220,17 +223,19 @@ class PresetSavingTests(unittest.TestCase):
             self.assertEqual(saved["name"], "My Preset")
             self.assertEqual(saved["augmentation"]["paper_tint"]["range"], [0.18, 0.18])
             self.assertEqual(saved["augmentation"]["jpeg"]["range"], [66, 66])
-            self.assertEqual(list(folder.glob(".*.tmp")), [])
+            self.assertEqual(list(folder.glob("user/.*.tmp")), [])
 
     def test_slug_rules(self):
-        self.assertEqual(gui.preset_slug("Heavy Ink & Gaps"), "heavy_ink_gaps")
-        self.assertEqual(gui.preset_slug("  Mixed-Case 2 "), "mixed-case_2")
+        self.assertEqual(studio_recipe.preset_slug("Heavy Ink & Gaps"), "heavy_ink_gaps")
+        self.assertEqual(studio_recipe.preset_slug("  Mixed-Case 2 "), "mixed-case_2")
         for name in ("COM1", "lpt9", "x" * 65, "&&&"):
             with self.assertRaises(ValueError):
-                gui.preset_slug(name)
+                studio_recipe.preset_slug(name)
         with tempfile.TemporaryDirectory() as temporary:
             self.assertEqual(
-                gui.preset_path_for("ok", Path(temporary)).parent, Path(temporary))
+                studio_recipe.preset_path_for("ok", Path(temporary)).parent, Path(temporary))
+            with self.assertRaises(ValueError):
+                studio_recipe.preset_path_for("../x", Path(temporary))
 
 
 class SnapAndFormatTests(unittest.TestCase):

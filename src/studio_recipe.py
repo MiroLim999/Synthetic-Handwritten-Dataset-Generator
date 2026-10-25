@@ -16,6 +16,7 @@ import copy
 import hashlib
 import json
 import math
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from numbers import Real
@@ -367,3 +368,170 @@ def resolved_recipe(settings: Mapping, *, name: str = "",
             value = {key: v for key, v in value.items() if v is not None}
         data[section] = value
     return parse_recipe(data)
+
+
+# ---------------------------------------------------------------------------
+# Preset storage
+# ---------------------------------------------------------------------------
+BUILTIN_PRESET_DIR = config.RESOURCES_DIR / "presets"
+USER_PRESET_SUBDIR = "user"
+_PRESET_PATH_CHARACTERS = frozenset('/\\:*?"<>|')
+MAX_PRESET_NAME_LENGTH = 64
+
+
+class PresetExistsError(FileExistsError):
+    """A user preset with this name exists; retry with ``overwrite=True``."""
+
+
+class ReadOnlyPresetError(PermissionError):
+    """Built-in presets cannot be overwritten, renamed, or deleted."""
+
+
+@dataclass(frozen=True)
+class PresetEntry:
+    """One listed preset.  ``error`` is set when the file does not validate."""
+
+    slug: str
+    name: str
+    path: Path
+    builtin: bool
+    sections: tuple[str, ...] = ()
+    description: str = ""
+    error: str | None = None
+
+    @property
+    def key(self) -> str:
+        """Unique handle: ``slug`` for built-ins, ``user/slug`` for user presets."""
+        return self.slug if self.builtin else f"{USER_PRESET_SUBDIR}/{self.slug}"
+
+
+def preset_slug(name: str) -> str:
+    """Turn a display name into a safe preset filename stem.
+
+    Letters are lowercased and runs of other characters become ``_``.  Names
+    with path characters, ``..``, control characters, Windows reserved device
+    names, or an empty/over-long result are rejected.
+    """
+    text = (name or "").strip()
+    if not text:
+        raise ValueError("Preset name cannot be blank.")
+    if (".." in text or any(ch in _PRESET_PATH_CHARACTERS for ch in text)
+            or any(ord(ch) < 32 for ch in text)):
+        raise ValueError(
+            "Preset names cannot contain path characters such as / \\ : or '..'.")
+    slug = re.sub(r"[^a-z0-9_-]+", "_", text.lower())
+    slug = re.sub(r"_+", "_", slug).strip("_-")
+    if not slug:
+        raise ValueError("Preset name must contain at least one letter or digit.")
+    if len(slug) > MAX_PRESET_NAME_LENGTH:
+        raise ValueError(
+            f"Preset name is too long (maximum {MAX_PRESET_NAME_LENGTH} characters).")
+    if slug.upper() in config._WINDOWS_RESERVED_NAMES:
+        raise ValueError(f"Preset name uses a reserved Windows device name: {slug!r}")
+    return slug
+
+
+def preset_path_for(slug: str, preset_dir: str | Path) -> Path:
+    """Return the preset file for ``slug``, refusing anything outside the folder."""
+    preset_dir = Path(preset_dir)
+    path = preset_dir / f"{slug}.json"
+    if path.resolve(strict=False).parent != preset_dir.resolve(strict=False):
+        raise ValueError(f"Preset path escapes the preset folder: {path}")
+    return path
+
+
+def _dirs(builtin_dir, user_dir) -> tuple[Path, Path]:
+    builtin = Path(BUILTIN_PRESET_DIR if builtin_dir is None else builtin_dir)
+    user = builtin / USER_PRESET_SUBDIR if user_dir is None else Path(user_dir)
+    return builtin, user
+
+
+def _entry(path: Path, builtin: bool) -> PresetEntry:
+    try:
+        recipe = load_recipe(path)
+    except RecipeError as exc:
+        return PresetEntry(path.stem, path.stem, path, builtin, error=str(exc))
+    return PresetEntry(path.stem, recipe.name or path.stem, path, builtin,
+                       recipe.sections, recipe.description)
+
+
+def list_presets(builtin_dir=None, user_dir=None) -> list[PresetEntry]:
+    """Built-in presets, then user presets, each sorted by slug."""
+    builtin, user = _dirs(builtin_dir, user_dir)
+    entries = []
+    for folder, is_builtin in ((builtin, True), (user, False)):
+        if folder.is_dir():
+            entries.extend(_entry(path, is_builtin)
+                           for path in sorted(folder.glob("*.json")))
+    return entries
+
+
+def find_preset(key: str, builtin_dir=None, user_dir=None) -> PresetEntry:
+    """Look up a preset by ``slug`` (built-in) or ``user/slug``."""
+    for entry in list_presets(builtin_dir, user_dir):
+        if entry.key == key:
+            return entry
+    raise FileNotFoundError(f"No preset named {key!r}")
+
+
+def save_user_preset(recipe: StudioRecipe, name: str, *, overwrite: bool = False,
+                     builtin_dir=None, user_dir=None) -> Path:
+    """Save ``recipe`` as a user preset named ``name`` (always schema v2).
+
+    A name that clashes with a built-in is refused; replacing an existing
+    user preset requires ``overwrite=True``.
+    """
+    builtin, user = _dirs(builtin_dir, user_dir)
+    slug = preset_slug(name)
+    if (builtin / f"{slug}.json").is_file():
+        raise ReadOnlyPresetError(
+            f"'{slug}' is a built-in preset name; choose another name.")
+    path = preset_path_for(slug, user)
+    if path.exists() and not overwrite:
+        raise PresetExistsError(f"A user preset named '{slug}' already exists.")
+    user.mkdir(parents=True, exist_ok=True)
+    save_recipe(path, replace(recipe, name=name.strip()))
+    return path
+
+
+def _require_user(entry: PresetEntry, action: str) -> None:
+    if entry.builtin:
+        raise ReadOnlyPresetError(f"Built-in presets are read-only; cannot {action} it.")
+
+
+def duplicate_preset(entry: PresetEntry, new_name: str, *, overwrite: bool = False,
+                     builtin_dir=None, user_dir=None) -> Path:
+    """Copy any preset (built-in or user) into a new user preset."""
+    return save_user_preset(load_recipe(entry.path), new_name, overwrite=overwrite,
+                            builtin_dir=builtin_dir, user_dir=user_dir)
+
+
+def rename_user_preset(entry: PresetEntry, new_name: str, *, overwrite: bool = False,
+                       builtin_dir=None, user_dir=None) -> Path:
+    _require_user(entry, "rename")
+    path = save_user_preset(load_recipe(entry.path), new_name, overwrite=overwrite,
+                            builtin_dir=builtin_dir, user_dir=user_dir)
+    if path.resolve() != entry.path.resolve():
+        entry.path.unlink()
+    return path
+
+
+def delete_user_preset(entry: PresetEntry) -> None:
+    _require_user(entry, "delete")
+    entry.path.unlink()
+
+
+def import_preset(source: str | Path, *, name: str | None = None,
+                  overwrite: bool = False, builtin_dir=None, user_dir=None) -> Path:
+    """Validate a recipe file, then copy it into the user presets as v2."""
+    recipe = load_recipe(source)
+    return save_user_preset(recipe, name or recipe.name or Path(source).stem,
+                            overwrite=overwrite, builtin_dir=builtin_dir,
+                            user_dir=user_dir)
+
+
+def export_preset(entry: PresetEntry, destination: str | Path) -> Path:
+    """Write a preset (validated, schema v2) to any path."""
+    destination = Path(destination)
+    save_recipe(destination, load_recipe(entry.path))
+    return destination
