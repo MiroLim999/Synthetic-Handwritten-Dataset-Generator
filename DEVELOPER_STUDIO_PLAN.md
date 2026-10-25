@@ -146,21 +146,21 @@ Fix the confirmed bugs before redesigning anything.
 
 Affected files: `gui.py`
 
-- [ ] Move everything `App.start()` collects into
+- [x] Move everything `App.start()` collects into
       `App._snapshot_run_options() -> RunOptions`, a frozen dataclass of plain
       values. `start()` validates and launches from that snapshot.
-- [ ] Keep the existing validation messages and confirmation dialogs.
+- [x] Keep the existing validation messages and confirmation dialogs.
 
 ## S1.2 Stroke damage only in semi-broken modes
 
 Affected files: `src/augment.py`, `gui.py`
 
-- [ ] In `degrade()`, run `_semi_broken` only when
+- [x] In `degrade()`, run `_semi_broken` only when
       `damage_profile.startswith("semi_broken")`. Params tune the damage; they never
       turn it on.
-- [ ] `RunOptions` and `_update_preview()` pass `semi_broken_params=None` outside
+- [x] `RunOptions` and `_update_preview()` pass `semi_broken_params=None` outside
       semi-broken modes.
-- [ ] Disable the Stroke Damage sliders while the mode is not semi-broken. This must
+- [x] Disable the Stroke Damage sliders while the mode is not semi-broken. This must
       keep working with the `_run_controls` lock/restore in `_set_job_active()`.
 
 Acceptance criteria:
@@ -172,12 +172,12 @@ Acceptance criteria:
 
 Affected files: `src/generate_synthetic.py`, `gui.py`
 
-- [ ] Rename `_field_weights_for_mode` to public `field_weights_for_mode`; keep the
+- [x] Rename `_field_weights_for_mode` to public `field_weights_for_mode`; keep the
       private name as an alias.
-- [ ] Fill the weight grid from `field_weights_for_mode(mode)` at startup and on
+- [x] Fill the weight grid from `field_weights_for_mode(mode)` at startup and on
       every mode change, with 0 for types the mode doesn't use. If that replaces
       edited values, say so in the status line.
-- [ ] "Reset Weights" resets to the current mode's weights.
+- [x] "Reset Weights" resets to the current mode's weights.
 
 Acceptance criteria:
 
@@ -191,7 +191,7 @@ Acceptance criteria:
 
 Affected files: `gui.py`, `resources/presets/clean_minimal.json`
 
-- [ ] Rename the sliders, widening the label column (currently `width=13`) so the
+- [x] Rename the sliders, widening the label column (currently `width=13`) so the
       new names fit:
       - "Contrast Drop" -> "Contrast-drop chance"
       - "Stroke Thin" -> "Stroke-thin chance"
@@ -200,38 +200,38 @@ Affected files: `gui.py`, `resources/presets/clean_minimal.json`
       - "Scratch Prob" -> "Scratch chance"
       - "Ink Fading" -> "Ink contrast", with the direction "lower = more faded" in
         the section subtitle
-- [ ] Set `"contrast": 0.0` in `clean_minimal.json`. Today the value 1.0 means broken
+- [x] Set `"contrast": 0.0` in `clean_minimal.json`. Today the value 1.0 means broken
       contrast on 100% of images.
 
 ## S1.5 Safe preset loading
 
 Affected files: `gui.py`
 
-- [ ] Validate every value first (number, finite, clamped to the slider range;
+- [x] Validate every value first (number, finite, clamped to the slider range;
       unknown keys reported), then apply them all. Never apply half a preset.
-- [ ] Reset `_slider_updating` in a `finally` block.
-- [ ] Set Char cutoff to Custom when any `crop_*` value is above 0; otherwise set it
+- [x] Reset `_slider_updating` in a `finally` block.
+- [x] Set Char cutoff to Custom when any `crop_*` value is above 0; otherwise set it
       to None.
-- [ ] The status line lists what was applied and which keys were ignored.
+- [x] The status line lists what was applied and which keys were ignored.
 
 ## S1.6 Safe preset saving
 
 Affected files: `gui.py`
 
-- [ ] Slug the name to `[a-z0-9_-]`, 1-64 characters. Reject empty results and
+- [x] Slug the name to `[a-z0-9_-]`, 1-64 characters. Reject empty results and
       Windows reserved names (reuse `config._WINDOWS_RESERVED_NAMES`). The saved
       file must stay inside `PRESET_DIR`.
-- [ ] Ask before overwriting an existing preset.
-- [ ] Write atomically (temp file, then `os.replace`), with values snapped to each
+- [x] Ask before overwriting an existing preset.
+- [x] Write atomically (temp file, then `os.replace`), with values snapped to each
       slider's step.
 
 ## S1.7 Slider steps that mean something
 
 Affected files: `gui.py`
 
-- [ ] Add pure helpers `snap_value(value, step, low, high)` and
+- [x] Add pure helpers `snap_value(value, step, low, high)` and
       `format_value(value, step, unit)`.
-- [ ] The slider callback snaps its variable to the step. Every label (move, preset
+- [x] The slider callback snaps its variable to the step. Every label (move, preset
       load, profile change, reset) uses `format_value`, so there is no more `int()`
       truncation.
 
@@ -239,45 +239,45 @@ Affected files: `gui.py`
 
 Affected files: `gui.py`
 
-- [ ] The studio header's "Reset" resets only studio sliders. Degradation sliders
+- [x] The studio header's "Reset" resets only studio sliders. Degradation sliders
       take the selected profile's values (as `_on_degradation_preset_change` does);
       stroke and crop sliders return to their defaults.
-- [ ] "Reset All Controls" also resets field weights and split ratios, which it
+- [x] "Reset All Controls" also resets field weights and split ratios, which it
       skips today.
 
 ## S1.9 Provenance for GUI runs (additive)
 
 Affected files: `src/generate_synthetic.py`
 
-- [ ] Add three keys to `run-metadata.json` under `effective_selection`:
+- [x] Add three keys to `run-metadata.json` under `effective_selection`:
       `stroke_damage_params` (null outside semi-broken modes), `field_weights`
       (effective weights with zeros dropped), and `split_fractions`.
-- [ ] `metadata_schema_version` stays `1`.
+- [x] `metadata_schema_version` stays `1`.
 
 ## S1.10 Tests
 
 Affected files: `tests/test_studio_bugfixes.py` (new)
 
-- [ ] Regular-mode `degrade` ignores stroke params (pixel equality).
-- [ ] The snapshot passes `semi_broken_params=None` in Regular mode and a dict in
+- [x] Regular-mode `degrade` ignores stroke params (pixel equality).
+- [x] The snapshot passes `semi_broken_params=None` in Regular mode and a dict in
       semi-broken modes.
-- [ ] For each mode, the grid weights give the same plan as `field_weights_for_mode`.
-- [ ] A malformed preset leaves sliders unchanged and responsive
+- [x] For each mode, the grid weights give the same plan as `field_weights_for_mode`.
+- [x] A malformed preset leaves sliders unchanged and responsive
       (`_slider_updating` is False).
-- [ ] Saving rejects `a/b`, `..\x`, `con`, `:x`, and blank names. An existing name
+- [x] Saving rejects `a/b`, `..\x`, `con`, `:x`, and blank names. An existing name
       with a declined overwrite leaves the file unchanged (use a temporary
       `PRESET_DIR`).
-- [ ] Edge cases for `snap_value` and `format_value`.
-- [ ] Metadata contains the S1.9 keys.
-- [ ] Parity: GUI options (Regular, built-in profile, default weights and splits) and
+- [x] Edge cases for `snap_value` and `format_value`.
+- [x] Metadata contains the S1.9 keys.
+- [x] Parity: GUI options (Regular, built-in profile, default weights and splits) and
       CLI defaults with the same seed give identical `images_sha256` and manifest
       hash.
 
 ### S1 verification gate
 
-- [ ] Gate commands pass, and the golden check reports no changes (the CLI is
+- [x] Gate commands pass, and the golden check reports no changes (the CLI is
       untouched).
-- [ ] Manual check: load every bundled preset, then generate 200 samples in Regular
+- [x] Manual check: load every bundled preset, then generate 200 samples in Regular
       and in "Semi-broken: characters". Check the field mix and the metadata.
 
 ---
