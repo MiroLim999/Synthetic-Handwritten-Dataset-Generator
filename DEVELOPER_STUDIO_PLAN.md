@@ -396,13 +396,13 @@ Affected files: `tests/test_augmentation_spec.py` (new),
 
 Affected files: `src/generation_profiles.py`, `config.py`
 
-- [ ] Add `CutoffSide(probability, fraction_range)` and `CutoffProfile` with
+- [x] Add `CutoffSide(probability, fraction_range)` and `CutoffProfile` with
       `profile_id`, `top`, `bottom`, `left`, `right`, `max_ink_loss`,
       `short_label_chars=3`, `short_label_max_fraction=0.10`, and method
       `ink_bbox_v1`.
-- [ ] Fractions are of the ink box: its height for top/bottom, its width for
+- [x] Fractions are of the ink box: its height for top/bottom, its width for
       left/right.
-- [ ] Registry, with starting values tuned in S3.9:
+- [x] Registry, with starting values tuned in S3.9:
 
   | Profile | Top / bottom (each) | Left / right (each) | Max ink loss |
   |---|---|---|---|
@@ -417,12 +417,12 @@ Affected files: `src/generation_profiles.py`, `config.py`
   (0.35) of one average character width, so they clip a letter rather than
   removing it.
 
-- [ ] `constrained_for_label(label)`: labels of 3 or fewer characters get no
+- [x] `constrained_for_label(label)`: labels of 3 or fewer characters get no
       left/right cuts, and their vertical cuts are capped at
       `short_label_max_fraction`.
-- [ ] Content-addressed IDs for custom profiles. `to_metadata()` includes
+- [x] Content-addressed IDs for custom profiles. `to_metadata()` includes
       `cutoff_schema_version: 1` and the method. Frozen and picklable.
-- [ ] Relabel `config.EDGE_CLIPPING_OPTIONS`, keeping the keys:
+- [x] Relabel `config.EDGE_CLIPPING_OPTIONS`, keeping the keys:
       - "Light - tips of tall letters"
       - "Moderate - loops and some word ends"
       - "Heavy - ascenders, descenders and word ends"
@@ -432,103 +432,103 @@ Affected files: `src/generation_profiles.py`, `config.py`
 
 Affected files: `src/cutoff.py` (new), `src/augment.py`
 
-- [ ] At the start of `degrade`, build an ink mask from the clean render
+- [x] At the start of `degrade`, build an ink mask from the clean render
       (gray < 200), but only when some side has chance > 0.
-- [ ] Split `_rotate` into `_draw_rotation_angle` (same draws) and `_rotate_by`.
+- [x] Split `_rotate` into `_draw_rotation_angle` (same draws) and `_rotate_by`.
       Apply the same angle to the image (bicubic, white fill) and the mask
       (nearest, 0 fill), both with `expand=True`.
-- [ ] Do the cut where `_clip_edges` runs today. For each side, in the order top,
+- [x] Do the cut where `_clip_edges` runs today. For each side, in the order top,
       bottom, left, right, and only if its chance is above 0: draw
       `rng.random() < p`, then `rng.uniform(*range)`.
-- [ ] Measure cut lines inward from the mask's bounding box. Sides that are not cut
+- [x] Measure cut lines inward from the mask's bounding box. Sides that are not cut
       keep their full extent and padding. Keep at least 10 px in each dimension.
-- [ ] Ink loss = removed mask pixels / all mask pixels. If it exceeds
+- [x] Ink loss = removed mask pixels / all mask pixels. If it exceeds
       `max_ink_loss`, halve all fractions (up to 3 times, no new draws). If it still
       exceeds the limit, make no cut.
-- [ ] Add `degrade_detailed() -> DegradeResult(image, cutoff: CutoffResult)`.
+- [x] Add `degrade_detailed() -> DegradeResult(image, cutoff: CutoffResult)`.
       `degrade()` becomes a wrapper that returns only the image.
-- [ ] No ink means no cut. Cutoff `none` makes zero extra draws, so its output stays
+- [x] No ink means no cut. Cutoff `none` makes zero extra draws, so its output stays
       byte-identical.
 
 ## S3.3 Quality check aware of cuts
 
 Affected files: `src/dataset_validation.py`, `src/generate_synthetic.py`
 
-- [ ] `assess_image_quality(image, *, cut_sides=frozenset())` counts edge ink per
+- [x] `assess_image_quality(image, *, cut_sides=frozenset())` counts edge ink per
       side and skips the sides that were cut. The threshold uses only the remaining
       sides' area.
-- [ ] With empty `cut_sides`, results are identical to today (same slices, same
+- [x] With empty `cut_sides`, results are identical to today (same slices, same
       threshold).
-- [ ] `_generate_valid_sample` applies `constrained_for_label`, passes the cut sides
+- [x] `_generate_valid_sample` applies `constrained_for_label`, passes the cut sides
       to the check, and keeps the fallback that drops cutting after 15 attempts.
 
 ## S3.4 Per-sample record: `cutoff-annotations.csv`
 
 Affected files: `src/generate_synthetic.py`
 
-- [ ] Worker results on both the thread and process paths carry the
+- [x] Worker results on both the thread and process paths carry the
       `CutoffResult` of the accepted attempt.
-- [ ] Write rows with `AtomicCsvWriter`, in manifest order, for cut samples only:
+- [x] Write rows with `AtomicCsvWriter`, in manifest order, for cut samples only:
       `filename, split, cut_top, cut_bottom, cut_left, cut_right, ink_loss`
       (4 decimal places).
-- [ ] Leave `evaluation-annotations.csv` alone; the notebooks pin its columns.
+- [x] Leave `evaluation-annotations.csv` alone; the notebooks pin its columns.
 
 ## S3.5 Validator, archive, and merge
 
 Affected files: `src/dataset_validation.py`, `src/handoff_validation.py`,
 `src/generate_synthetic.py`
 
-- [ ] `validate_dataset` loads the sidecar, when present, into its SQLite index so
+- [x] `validate_dataset` loads the sidecar, when present, into its SQLite index so
       memory stays bounded.
-- [ ] It rejects malformed rows, duplicates, values outside [0, 1), and rows without
+- [x] It rejects malformed rows, duplicates, values outside [0, 1), and rows without
       a matching synthetic manifest row. Valid rows pass their cut sides to the
       image check.
-- [ ] Report statistics gain `cutoff: {samples, by_side, max_ink_loss}`.
-- [ ] Additive metadata keys: `cutoff_profile` (`to_metadata()`),
+- [x] Report statistics gain `cutoff: {samples, by_side, max_ink_loss}`.
+- [x] Additive metadata keys: `cutoff_profile` (`to_metadata()`),
       `cutoff_annotations` (filename), and `cutoff_annotations_sha256`.
       `effective_selection.edge_clipping` holds the cutoff profile ID.
-- [ ] `validate_handoff_bytes` and `validate_handoff_files` get an optional sidecar
+- [x] `validate_handoff_bytes` and `validate_handoff_files` get an optional sidecar
       argument and check its hash whenever metadata names the file. This is
       generator-side only; the notebooks are untouched.
-- [ ] `_write_montage` includes up to 4 cut samples, captioned `cut:top` and so on.
+- [x] `_write_montage` includes up to 4 cut samples, captioned `cut:top` and so on.
 
 ## S3.6 GUI interim and old API
 
 Affected files: `gui.py`, `src/augment.py`, `tests/test_degradation_and_clipping.py`
 
-- [ ] The Char cutoff dropdown maps to `CUTOFF_PROFILES`.
-- [ ] Custom crop sliders build a `CutoffProfile` with chance 1.0 and min = max per
+- [x] The Char cutoff dropdown maps to `CUTOFF_PROFILES`.
+- [x] Custom crop sliders build a `CutoffProfile` with chance 1.0 and min = max per
       side. Slider ranges come from the spec. Labels: "Top cut - % of letter height",
       "Left cut - % of word width".
-- [ ] `_on_clipping_preset_change` fills the custom sliders with range midpoints
+- [x] `_on_clipping_preset_change` fills the custom sliders with range midpoints
       (interim; replaced in S5).
-- [ ] Remove `EDGE_CLIPPING_RANGES` and the canvas-relative `_clip_edges`, and
+- [x] Remove `EDGE_CLIPPING_RANGES` and the canvas-relative `_clip_edges`, and
       update their imports.
-- [ ] Rewrite `test_edge_clipping_dimensions` for the new behavior: a blank image is
+- [x] Rewrite `test_edge_clipping_dimensions` for the new behavior: a blank image is
       not cut, and an image with ink is cut relative to its ink.
 
 ## S3.7 Tests
 
 Affected files: `tests/test_character_cutoff.py` (new), `tests/test_dataset_validation.py`
 
-- [ ] A top cut removes ink at the top: ink touches the top edge and no other edge.
-- [ ] Ink loss stays at or below the maximum, and the shrink steps add no random
+- [x] A top cut removes ink at the top: ink touches the top edge and no other edge.
+- [x] Ink loss stays at or below the maximum, and the shrink steps add no random
       draws.
-- [ ] Short labels get no side cuts and capped vertical cuts.
-- [ ] Rotation plus cut stays aligned (mask and image dimensions match).
-- [ ] Cutoff `none` is byte-identical to before.
-- [ ] The quality check still rejects ink at sides that were not cut.
-- [ ] The validator accepts a correct sidecar and rejects orphan, duplicate, and
+- [x] Short labels get no side cuts and capped vertical cuts.
+- [x] Rotation plus cut stays aligned (mask and image dimensions match).
+- [x] Cutoff `none` is byte-identical to before.
+- [x] The quality check still rejects ink at sides that were not cut.
+- [x] The validator accepts a correct sidecar and rejects orphan, duplicate, and
       out-of-range rows, plus hash mismatches.
-- [ ] Zipping a dataset that has a sidecar works, and a real-data merge keeps it
+- [x] Zipping a dataset that has a sidecar works, and a real-data merge keeps it
       valid.
-- [ ] Thread and process worker paths write identical sidecars.
+- [x] Thread and process worker paths write identical sidecars.
 
 ## S3.8 Measurement tool
 
 Affected files: `tools/cutoff_stats.py` (new)
 
-- [ ] For each cutoff profile, print:
+- [x] For each cutoff profile, print:
       - mean attempts per kept sample
       - % of samples with a real cut (ink loss > 0)
       - mean and max ink loss
@@ -536,7 +536,7 @@ Affected files: `tools/cutoff_stats.py` (new)
 
 ## S3.9 Tune the defaults
 
-- [ ] Adjust the S3.1 table with `python -m tools.cutoff_stats` and the review
+- [x] Adjust the S3.1 table with `python -m tools.cutoff_stats` and the review
       montage until the targets below hold and cut labels still read correctly in
       the montage.
 
@@ -548,9 +548,9 @@ Acceptance criteria:
 
 ### S3 verification gate
 
-- [ ] Gate commands pass. Only `cutoff=heavy` golden configs changed; re-baseline
+- [x] Gate commands pass. Only `cutoff=heavy` golden configs changed; re-baseline
       exactly those.
-- [ ] Manual check: generate 500 samples with Heavy cutoff, then review the montage
+- [x] Manual check: generate 500 samples with Heavy cutoff, then review the montage
       and `cutoff-annotations.csv`.
 
 ---
