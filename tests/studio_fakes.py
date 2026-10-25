@@ -7,6 +7,7 @@ from unittest import mock
 
 import config
 import gui
+from src.studio_recipe import StudioState
 
 
 class FakeVar:
@@ -37,24 +38,8 @@ def studio_app(mode: str = "regular", *, count: int = 12, seed: int = 42):
     app.cursive_group_var = FakeVar("All cursive")
     app.specific_font_var = FakeVar("All in group")
     app.specific_font_map = {"All in group": ""}
-    app.degradation_by_label = {
-        label: key for key, label in config.DEGRADATION_PROFILES.items()
-    }
-    app.degradation_var = FakeVar(
-        config.DEGRADATION_PROFILES[config.DEFAULT_DEGRADATION_PROFILE]
-    )
-    app.clipping_by_label = {
-        label: key for key, label in config.EDGE_CLIPPING_OPTIONS.items()
-    }
-    app.edge_clipping_var = FakeVar(
-        config.EDGE_CLIPPING_OPTIONS[config.DEFAULT_EDGE_CLIPPING]
-    )
-    app.dev_sliders = {
-        name: FakeVar(spec.default) for name, spec in gui.SLIDER_SPECS.items()
-    }
-    app.dev_labels = {name: FakeVar("") for name in gui.SLIDER_SPECS}
-    app.dev_scales = {}
-    app._slider_updating = False
+    app.studio_state = StudioState.default()
+    app.studio_panel = None
     app._run_control_states = []
     app.real_var = FakeVar(False)
     app.zip_var = FakeVar(False)
@@ -66,9 +51,8 @@ def studio_app(mode: str = "regular", *, count: int = 12, seed: int = 42):
     }
     app._reset_field_weights()
     app.workers_var = FakeVar("Auto (Max)")
-    app.preset_var = FakeVar("")
     app.status = mock.Mock()
     app._update_preview = mock.Mock()
+    app._update_split_sum_label = mock.Mock()
     app._on_font_style_change = mock.Mock()
-    app._recipe_sections = {}
     return app

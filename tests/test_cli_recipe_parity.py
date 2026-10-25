@@ -65,7 +65,7 @@ class RecipeParityTests(unittest.TestCase):
 
     def test_gui_snapshot_and_cli_give_identical_datasets(self):
         app = studio_app()
-        app._apply_recipe_to_studio("parity", load_recipe(self.recipe_path))
+        app._apply_loaded_recipe("parity", load_recipe(self.recipe_path))
         app.count_var.set("16")
         app.dataset_var.set("gui_run")
         app.workers_var.set("1")

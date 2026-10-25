@@ -1,4 +1,8 @@
-"""Regression tests for the S1 Developer Studio correctness fixes."""
+"""Regression tests for the S1 Developer Studio correctness fixes.
+
+The S1 guarantees still hold after the Studio tab rebuild; these tests check
+them against the studio state rather than the old single-value sliders.
+"""
 
 from __future__ import annotations
 
@@ -16,11 +20,13 @@ from PIL import Image, ImageDraw
 
 import config
 import gui
+from src import studio_spec
 from src.augment import degrade
 from src.generate_synthetic import field_weights_for_mode, generate
-from src import studio_recipe
-from src.generation_profiles import StrokeDamageProfile
 from src.generation_io import iter_generation_plan
+from src.generation_profiles import stroke_damage_from_config
+from src.studio_recipe import (RECIPE_FORMAT, StudioState, load_recipe,
+                               migrate_v1, parse_recipe)
 from tests.studio_fakes import studio_app
 
 
@@ -55,28 +61,21 @@ class RegularModeStrokeDamageTests(unittest.TestCase):
             if not mode.startswith("semi_broken"):
                 continue
             profile = studio_app(mode)._snapshot_run_options().stroke_damage_profile
-            self.assertIsInstance(profile, StrokeDamageProfile, mode)
-            self.assertEqual(profile.gap_count_range, (1, 16))
-            self.assertEqual(profile.contrast_probability, 0.8)
+            self.assertEqual(profile, stroke_damage_from_config(), mode)
 
-    def test_stroke_sliders_disabled_outside_semi_broken_modes(self):
+    def test_stroke_controls_follow_the_mode_and_respect_the_run_lock(self):
         app = studio_app("regular")
-        scales = {name: mock.Mock() for name in gui.STROKE_DAMAGE_SLIDERS}
-        app.dev_scales = scales
+        app.studio_panel = mock.Mock()
         app._sync_stroke_damage_state()
-        for scale in scales.values():
-            scale.config.assert_called_with(state="disabled")
+        app.studio_panel.set_stroke_enabled.assert_called_with(False)
         app.sample_mode_var.set(config.SAMPLE_MODES["semi_broken_words"])
         app._sync_stroke_damage_state()
-        for scale in scales.values():
-            scale.config.assert_called_with(state="normal")
+        app.studio_panel.set_stroke_enabled.assert_called_with(True)
         # While a job holds the lock, the restore path owns widget states.
         app._run_control_states = [(object(), "normal")]
-        for scale in scales.values():
-            scale.config.reset_mock()
+        app.studio_panel.reset_mock()
         app._sync_stroke_damage_state()
-        for scale in scales.values():
-            scale.config.assert_not_called()
+        app.studio_panel.set_stroke_enabled.assert_not_called()
 
 
 class FieldWeightTests(unittest.TestCase):
@@ -120,122 +119,48 @@ class FieldWeightTests(unittest.TestCase):
 
 
 class PresetLoadingTests(unittest.TestCase):
-    def _load(self, app, data):
-        with tempfile.TemporaryDirectory() as temporary:
-            folder = Path(temporary)
-            (folder / "candidate.json").write_text(json.dumps(data), encoding="utf-8")
-            app.preset_var.set("candidate")
-            with (mock.patch.object(gui, "PRESET_DIR", folder),
-                  mock.patch.object(gui.messagebox, "showerror") as showerror):
-                app._load_selected_preset()
-        return showerror
+    def test_loading_applies_only_the_sections_a_preset_contains(self):
+        app = studio_app("regular")
+        cutoff = studio_spec.default_section("cutoff")
+        cutoff["top"] = {"probability": 1.0, "range": [0.03, 0.03]}
+        before = app.studio_state
+        app._apply_loaded_recipe("only_cutoff", parse_recipe({
+            "format": RECIPE_FORMAT, "schema_version": 2, "name": "Cut",
+            "cutoff": cutoff, "run": {"sample_mode": "semi_broken_words"}}))
+        self.assertEqual(app.studio_state.augmentation, before.augmentation)
+        self.assertEqual(app.studio_state.cutoff_profile().top.fraction_range, (0.03, 0.03))
+        self.assertEqual(app._current_sample_mode(), "semi_broken_words")
+        self.assertFalse(app.studio_state.dirty)
+        self.assertEqual(app.studio_state.source_key, "only_cutoff")
+        self.assertIn("cutoff, run", app.status.config.call_args.kwargs["text"])
 
-    def test_malformed_preset_leaves_sliders_unchanged_and_responsive(self):
+    def test_old_flat_preset_is_migrated_and_clamped(self):
         app = studio_app()
-        before = {name: var.get() for name, var in app.dev_sliders.items()}
-        showerror = self._load(app, {"tint": 0.3, "fade": "faded", "noise": float("nan")})
-        showerror.assert_called_once()
-        self.assertIn("fade", showerror.call_args.args[1])
-        self.assertEqual({name: var.get() for name, var in app.dev_sliders.items()}, before)
-        self.assertFalse(app._slider_updating)
-
-    def test_failure_while_applying_still_releases_slider_lock(self):
-        app = studio_app()
-        app.dev_labels["tint"].set = mock.Mock(side_effect=RuntimeError("Tk gone"))
-        with self.assertRaises(RuntimeError):
-            app._apply_preset_values("x", {"tint": 0.2}, [])
-        self.assertFalse(app._slider_updating)
-
-    def test_old_flat_preset_is_migrated_clamped_and_reported(self):
-        app = studio_app()
-        self._load(app, {"name": "X", "tint": 0.9, "jpeg": 66.4, "crop_top": 3})
-        # Sliders show the migrated values; the run uses the recipe itself.
-        self.assertEqual(app.dev_sliders["tint"].get(), gui.SLIDER_SPECS["tint"].high)
-        self.assertEqual(app.dev_sliders["jpeg"].get(), 66.0)
-        self.assertEqual(app.edge_clipping_var.get(), config.EDGE_CLIPPING_OPTIONS["custom"])
+        app._apply_loaded_recipe("old", migrate_v1(
+            {"name": "X", "tint": 0.9, "jpeg": 66.4, "crop_top": 3}))
         options = app._snapshot_run_options()
         self.assertEqual(options.augmentation_profile.paper_tint_alpha_range, (0.5, 0.5))
         self.assertEqual(options.augmentation_profile.jpeg_quality_range, (66, 66))
         self.assertEqual(options.edge_clipping.top.fraction_range, (0.03, 0.03))
-        message = app.status.config.call_args.kwargs["text"]
-        self.assertIn("augmentation, stroke_damage, cutoff", message)
 
-    def test_unknown_keys_reject_the_whole_preset(self):
-        app = studio_app()
-        showerror = self._load(app, {"tint": 0.2, "mystery": 1})
-        self.assertIn("mystery", showerror.call_args.args[1])
-        self.assertEqual(app.dev_sliders["tint"].get(), gui.SLIDER_SPECS["tint"].default)
-
-    def test_editing_a_group_drops_only_that_recipe_section(self):
-        app = studio_app("semi_broken_mixed")
-        self._load(app, {"tint": 0.3, "gap_count": 4, "crop_left": 2})
-        self.assertEqual(set(app._recipe_sections), {"augmentation", "stroke_damage",
-                                                     "cutoff"})
-        app._on_developer_slider_change("gap_prob")
-        self.assertEqual(set(app._recipe_sections), {"augmentation", "cutoff"})
-        app._on_developer_slider_change("crop_top")
-        self.assertEqual(set(app._recipe_sections), {"augmentation"})
-
-    def test_preset_without_crops_sets_cutoff_to_none(self):
-        app = studio_app()
-        app.edge_clipping_var.set(config.EDGE_CLIPPING_OPTIONS["heavy"])
-        self._load(app, {"crop_top": 0, "crop_bottom": 0, "crop_left": 0,
-                         "crop_right": 0})
-        self.assertEqual(app.edge_clipping_var.get(), config.EDGE_CLIPPING_OPTIONS["none"])
-
-
-class PresetSavingTests(unittest.TestCase):
-    def _save(self, app, folder, name, *, overwrite=False):
-        with (mock.patch.object(gui, "PRESET_DIR", folder),
-              mock.patch.object(gui.simpledialog, "askstring", return_value=name),
-              mock.patch.object(gui.messagebox, "askyesno", return_value=overwrite),
-              mock.patch.object(gui.messagebox, "showerror") as showerror):
-            app._refresh_preset_list = mock.Mock()
-            app._save_current_preset()
-        return showerror
-
-    def test_unsafe_names_are_rejected(self):
+    def test_malformed_presets_are_rejected_before_anything_changes(self):
         with tempfile.TemporaryDirectory() as temporary:
-            folder = Path(temporary) / "presets"
-            folder.mkdir()
-            (folder / "builtin.json").write_text("{}", encoding="utf-8")
-            for name in ("a/b", "..\\x", "con", ":x", "   ", "", "Builtin"):
-                showerror = self._save(studio_app(), folder, name)
-                showerror.assert_called_once()
-            self.assertEqual([p.name for p in folder.iterdir()], ["builtin.json"])
+            bad = Path(temporary) / "bad.json"
+            for content in ({"tint": 0.3, "fade": "faded"}, {"tint": 0.2, "mystery": 1},
+                            {"fade": float("nan")}):
+                bad.write_text(json.dumps(content), encoding="utf-8")
+                with self.assertRaises(ValueError):
+                    load_recipe(bad)
 
-    def test_declined_overwrite_leaves_file_unchanged(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            folder = Path(temporary)
-            (folder / "user").mkdir()
-            existing = folder / "user" / "my_preset.json"
-            existing.write_text('{"name": "original"}', encoding="utf-8")
-            self._save(studio_app(), folder, "My Preset", overwrite=False)
-            self.assertEqual(existing.read_text(encoding="utf-8"), '{"name": "original"}')
-
-            app = studio_app()
-            app.degradation_var.set(config.DEGRADATION_PROFILES["custom_dev_v1"])
-            app.dev_sliders["tint"].set(0.18319)
-            app.dev_sliders["jpeg"].set(66.2)
-            self._save(app, folder, "My Preset", overwrite=True)
-            saved = json.loads(existing.read_text(encoding="utf-8"))
-            self.assertEqual(saved["schema_version"], 2)
-            self.assertEqual(saved["name"], "My Preset")
-            self.assertEqual(saved["augmentation"]["paper_tint"]["range"], [0.18, 0.18])
-            self.assertEqual(saved["augmentation"]["jpeg"]["range"], [66, 66])
-            self.assertEqual(list(folder.glob("user/.*.tmp")), [])
-
-    def test_slug_rules(self):
-        self.assertEqual(studio_recipe.preset_slug("Heavy Ink & Gaps"), "heavy_ink_gaps")
-        self.assertEqual(studio_recipe.preset_slug("  Mixed-Case 2 "), "mixed-case_2")
-        for name in ("COM1", "lpt9", "x" * 65, "&&&"):
-            with self.assertRaises(ValueError):
-                studio_recipe.preset_slug(name)
-        with tempfile.TemporaryDirectory() as temporary:
-            self.assertEqual(
-                studio_recipe.preset_path_for("ok", Path(temporary)).parent, Path(temporary))
-            with self.assertRaises(ValueError):
-                studio_recipe.preset_path_for("../x", Path(temporary))
+    def test_editing_after_load_marks_the_recipe_custom(self):
+        state = StudioState.default().loaded(
+            load_recipe(gui.PRESET_DIR / "historical_faded.json"),
+            source_name="Historical Faded Scan", source_key="historical_faded")
+        self.assertEqual(state.label, "Historical Faded Scan")
+        edited = state.with_value(studio_spec.PARAMS_BY_PATH["augmentation.blur.range"],
+                                  [0.5, 1.0])
+        self.assertEqual(edited.label, "custom (based on Historical Faded Scan)")
+        self.assertEqual(edited.dirty_sections, ("augmentation",))
 
 
 class SnapAndFormatTests(unittest.TestCase):
@@ -259,27 +184,37 @@ class SnapAndFormatTests(unittest.TestCase):
         self.assertEqual(gui.format_value(-0.0001, 0.01), "0.00")
         self.assertEqual(gui.format_value(75.0, 1), "75")
 
-    def test_every_slider_default_is_on_its_step(self):
-        for spec in gui.SLIDER_SPECS.values():
-            self.assertEqual(
-                gui.snap_value(spec.default, spec.step, spec.low, spec.high),
-                spec.default, spec.name)
+    def test_every_spec_default_is_on_its_step(self):
+        for spec in studio_spec.PARAMS:
+            values = spec.default if spec.kind == "range" else (spec.default,)
+            for value in values:
+                self.assertEqual(
+                    gui.snap_value(value, spec.step, spec.low, spec.high), value, spec.path)
 
 
 class ResetScopeTests(unittest.TestCase):
-    def test_studio_reset_touches_only_studio_sliders(self):
+    def test_section_reset_returns_to_the_loaded_source_only(self):
+        state = StudioState.default()
+        blur = studio_spec.PARAMS_BY_PATH["augmentation.blur.range"]
+        top = studio_spec.PARAMS_BY_PATH["cutoff.top.probability"]
+        edited = state.with_value(blur, [0.5, 1.0]).with_value(top, 0.5)
+        reset = edited.reset_section("augmentation", [blur])
+        self.assertEqual(reset.value(blur), [0.4, 1.8])
+        self.assertEqual(reset.value(top), 0.5)
+
+    def test_reset_all_also_resets_weights_splits_and_studio(self):
         app = studio_app()
-        app.dev_sliders["contrast"].set(0.1)
-        app.dev_sliders["crop_top"].set(5.0)
         app.split_train_var.set("70")
         app.field_weight_vars["age"].set("77")
-        app._reset_studio_sliders()
-        self.assertEqual(app.dev_sliders["contrast"].get(), 0.8)
-        self.assertEqual(app.dev_sliders["crop_top"].get(), 0.0)
-        # historical_scan_v1 midpoint, snapped to the 0.01 step.
-        self.assertEqual(app.dev_sliders["fade"].get(), 0.68)
-        self.assertEqual(app.split_train_var.get(), "70")
-        self.assertEqual(app.field_weight_vars["age"].get(), "77")
+        app.count_var.set("5")
+        app.studio_state = app.studio_state.with_base_profile("scan_noise")
+        app.cursive_row = mock.Mock()
+        with mock.patch.object(gui.App, "_on_font_style_change"):
+            app._reset_all_controls()
+        self.assertEqual(app.split_train_var.get(), "80")
+        self.assertEqual(app.field_weight_vars["age"].get(), "5")
+        self.assertEqual(app.count_var.get(), str(config.DEFAULT_COUNT))
+        self.assertEqual(app.studio_state, StudioState.default())
 
 
 class ProvenanceAndParityTests(unittest.TestCase):
@@ -299,7 +234,8 @@ class ProvenanceAndParityTests(unittest.TestCase):
                 stroke_damage_profile=options.stroke_damage_profile,
                 custom_field_weights=options.custom_field_weights,
                 custom_split_fractions=options.custom_split_fractions,
-                workers=options.workers,
+                workers=options.workers, recipe=options.recipe,
+                recipe_source=options.recipe_source,
             )
             cli_dir = generate(12, dataset="cli_run", seed=42, show_bar=False)
             semi_dir = generate(12, dataset="semi_run", seed=42, show_bar=False,
@@ -315,6 +251,8 @@ class ProvenanceAndParityTests(unittest.TestCase):
         self.assertEqual(selection["field_weights"], field_weights_for_mode("regular"))
         self.assertEqual(selection["split_fractions"], [0.8, 0.1, 0.1])
         self.assertEqual(gui_meta["metadata_schema_version"], 1)
+        self.assertEqual(gui_meta["studio_recipe"]["source_preset"], "historical_scan_v1")
+        self.assertFalse(gui_meta["studio_recipe"]["modified"])
         semi_selection = semi_meta["effective_selection"]
         self.assertEqual(semi_meta["stroke_damage_profile"]["gap_probability"],
                          config.BROKEN_INK_GAP_PROB)

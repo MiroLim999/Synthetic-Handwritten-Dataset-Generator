@@ -6,7 +6,6 @@ Launch by double-clicking "Generate Images.bat", or run:
 """
 
 import json
-import math
 import os
 import sys
 import time
@@ -19,7 +18,7 @@ import tkinter as tk
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from tkinter import ttk, messagebox, simpledialog
+from tkinter import ttk, messagebox
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -28,30 +27,18 @@ from PIL import Image, ImageDraw, ImageFont, ImageTk
 import random
 
 import config
+from gui_studio import STUDIO_CHANGED, StudioPanel
+from gui_widgets import format_value, snap_value  # noqa: F401  (re-exported)
 from src import fields
-from src import studio_spec
 from src.augment import degrade
-from src.generation_profiles import (AUGMENTATION_PROFILES, CUTOFF_PROFILES,
-                                     DEFAULT_WRITER_PROFILE_ID,
-                                     CutoffProfile, as_cutoff_profile,
-                                     StrokeDamageProfile,
-                                     augmentation_profile_from_spec,
-                                     augmentation_spec_from_legacy_values,
-                                     augmentation_spec_from_profile,
-                                     cutoff_profile_from_spec,
-                                     cutoff_spec_from_profile,
-                                     stroke_damage_from_spec,
-                                     stroke_damage_spec_from_profile,
-                                     get_augmentation_profile)
+from src.generation_profiles import (DEFAULT_WRITER_PROFILE_ID, CutoffProfile,
+                                     StrokeDamageProfile)
 from src.generate_synthetic import (GenerationCancelled, field_weights_for_mode,
                                     generate, guarded_remove_dataset,
                                     zip_dataset)
 from src.generation_io import verify_sha256_sidecar
 from src.generation_resources import preflight_generation_resources
-from src.studio_recipe import (PresetExistsError, ReadOnlyPresetError,
-                               RecipeError, StudioRecipe, find_preset,
-                               list_presets, load_recipe, parse_recipe,
-                               preset_slug, save_user_preset)
+from src.studio_recipe import StudioRecipe, StudioState
 from src.build_splits import build
 from src.render import (CURSIVE_STYLE_GROUPS, fonts_for_style,
                         font_display_name, font_path_for)
@@ -79,85 +66,6 @@ LOG_FILE = LOG_DIR / "gui.log"
 PRESET_DIR = config.RESOURCES_DIR / "presets"
 MAX_LOG_BYTES = 2 * 1024 * 1024
 LOG_BACKUPS = 3
-
-
-@dataclass(frozen=True)
-class SliderSpec:
-    """One Developer Studio slider: range, step, unit, and default."""
-
-    name: str
-    label: str
-    low: float
-    high: float
-    default: float
-    step: float
-    unit: str = ""
-
-
-DEGRADATION_SLIDER_SPECS = (
-    SliderSpec("fade", "Ink contrast", 0.10, 1.00, 0.65, 0.01),
-    SliderSpec("tint", "Paper tint", 0.00, 0.40, 0.15, 0.01),
-    SliderSpec("stain", "Stain chance", 0.00, 1.00, 0.35, 0.01),
-    SliderSpec("rotate", "Tilt angle", 0.0, 12.0, 4.5, 0.1, "°"),
-    SliderSpec("blur", "Blur radius", 0.0, 3.0, 0.0, 0.1, "px"),
-    SliderSpec("noise", "Grain noise", 0.0, 40.0, 12.0, 1.0),
-    SliderSpec("texture", "Paper fiber", 0.0, 12.0, 3.5, 0.1),
-    SliderSpec("scanline", "Scanlines", 0.0, 30.0, 10.0, 1.0),
-    SliderSpec("jpeg", "JPEG quality", 20.0, 100.0, 75.0, 1.0),
-)
-# Custom cutoff sliders: percent of the ink box, ranges from studio_spec.
-CROP_SLIDER_SPECS = tuple(
-    SliderSpec(
-        f"crop_{side}",
-        f"{side.title()} cut - % of "
-        f"{'letter height' if side in ('top', 'bottom') else 'word width'}",
-        0.0, studio_spec.PARAMS_BY_PATH[f"cutoff.{side}.range"].high * 100.0,
-        0.0, 1.0, "%",
-    )
-    for side in studio_spec.CUTOFF_SIDES
-)
-STROKE_SLIDER_SPECS = (
-    SliderSpec("contrast", "Contrast-drop chance", 0.00, 1.00, 0.80, 0.01),
-    SliderSpec("gap_prob", "Gap chance", 0.00, 1.00, 0.90, 0.01),
-    SliderSpec("gap_count", "Max gaps", 0.0, 30.0, 16.0, 1.0),
-    SliderSpec("scratch", "Scratch chance", 0.00, 1.00, 0.70, 0.01),
-    SliderSpec("erode", "Stroke-thin chance", 0.00, 1.00, 0.55, 0.01),
-)
-SLIDER_SPECS = {
-    spec.name: spec
-    for spec in (*DEGRADATION_SLIDER_SPECS, *CROP_SLIDER_SPECS, *STROKE_SLIDER_SPECS)
-}
-STROKE_DAMAGE_SLIDERS = tuple(spec.name for spec in STROKE_SLIDER_SPECS)
-SLIDER_LABEL_WIDTH = 30
-
-
-def _step_decimals(step: float) -> int:
-    """Number of decimal places a step needs (0.01 -> 2, 0.5 -> 1, 1 -> 0)."""
-    text = f"{step:.10f}".rstrip("0").rstrip(".")
-    return len(text.partition(".")[2])
-
-
-def snap_value(value, step: float, low: float, high: float) -> float:
-    """Clamp ``value`` to [low, high] and round it to the nearest ``step``."""
-    value = float(value)
-    step = float(step)
-    if not math.isfinite(value):
-        raise ValueError(f"value must be finite; got {value!r}")
-    if not math.isfinite(step) or step <= 0:
-        raise ValueError(f"step must be a positive finite number; got {step!r}")
-    if low > high:
-        raise ValueError(f"low ({low}) must not exceed high ({high})")
-    clamped = min(high, max(low, value))
-    snapped = round(round(clamped / step) * step, _step_decimals(step))
-    return float(min(high, max(low, snapped)))
-
-
-def format_value(value, step: float, unit: str = "") -> str:
-    """Format ``value`` with exactly the precision its step implies."""
-    text = f"{float(value):.{_step_decimals(step)}f}"
-    if text.startswith("-") and float(text) == 0:
-        text = text[1:]
-    return f"{text}{unit}"
 
 
 def _rotate_log(log_path: Path | None = None) -> None:
@@ -195,49 +103,6 @@ if sys.stdout is None:
     sys.stdout = open(LOG_FILE.with_name("gui-stdout.log"), "a", encoding="utf-8")
 if sys.stderr is None:
     sys.stderr = open(LOG_FILE, "a", encoding="utf-8")
-
-
-def recipe_slider_values(recipe: StudioRecipe) -> dict[str, float]:
-    """Single-value slider readings that best describe a recipe's sections.
-
-    Interim display only: runs use the recipe sections themselves.
-    """
-    values: dict[str, float] = {}
-
-    def mid(pair):
-        return (pair[0] + pair[1]) / 2.0
-
-    aug = recipe.augmentation
-    if aug is not None:
-        def on(effect, off_value, reading):
-            return reading if aug[effect]["probability"] > 0 else off_value
-        values.update({
-            "fade": on("fade", 1.0, mid(aug["fade"]["range"])),
-            "tint": on("paper_tint", 0.0, mid(aug["paper_tint"]["range"])),
-            "stain": aug["stains"]["probability"],
-            "rotate": on("rotation", 0.0, aug["rotation"]["range"][1]),
-            "blur": on("blur", 0.0, mid(aug["blur"]["range"])),
-            "noise": on("noise", 0.0, mid(aug["noise"]["range"])),
-            "texture": on("paper_texture", 0.0, mid(aug["paper_texture"]["range"])),
-            "scanline": on("scanlines", 0.0, mid(aug["scanlines"]["range"])),
-            "jpeg": on("jpeg", 100.0, mid(aug["jpeg"]["range"])),
-        })
-    stroke = recipe.stroke_damage
-    if stroke is not None:
-        values.update({
-            "contrast": stroke["contrast"]["probability"],
-            "gap_prob": stroke["gaps"]["probability"],
-            "gap_count": stroke["gaps"]["count_range"][1],
-            "scratch": stroke["scratches"]["probability"],
-            "erode": stroke["erode"]["probability"],
-        })
-    cutoff = recipe.cutoff
-    if cutoff is not None:
-        for side in studio_spec.CUTOFF_SIDES:
-            entry = cutoff[side]
-            values[f"crop_{side}"] = (
-                mid(entry["range"]) * 100.0 if entry["probability"] > 0 else 0.0)
-    return values
 
 
 def _split_percent(fraction: float) -> str:
@@ -353,7 +218,9 @@ class App(tk.Tk):
         self._field_weights_mode = config.DEFAULT_SAMPLE_MODE
         for ftype, weight in mode_field_weights(config.DEFAULT_SAMPLE_MODE).items():
             self.field_weight_vars[ftype] = tk.StringVar(value=str(weight))
-        self.preset_var = tk.StringVar(value="")
+        self.studio_state = StudioState.default()
+        self.studio_panel = None
+        self._scroll_areas = []        # (tab, canvas) pairs for wheel scrolling
 
         self._apply_theme()
         self._build_ui()
@@ -570,140 +437,99 @@ class App(tk.Tk):
         self.nb.pack(fill="both", expand=True, padx=8, pady=(8, 8))
 
         self.tab_generate = ttk.Frame(self.nb)
+        self.tab_studio = ttk.Frame(self.nb)
         self.tab_datasets = ttk.Frame(self.nb)
         self.nb.add(self.tab_generate, text="  Generate  ")
+        self.nb.add(self.tab_studio, text="  Studio  ")
         self.nb.add(self.tab_datasets, text="  Datasets  ")
         self.nb.bind("<<NotebookTabChanged>>", self._on_tab_change)
 
         self._build_generate_tab(self.tab_generate)
+        self._build_studio_tab(self.tab_studio)
         self._build_datasets_tab(self.tab_datasets)
+        self.bind_all("<MouseWheel>", self._on_mousewheel)
+        self.bind_all("<Button-4>", self._on_mousewheel)
+        self.bind_all("<Button-5>", self._on_mousewheel)
+
+    def _scroll_area(self, parent, tab):
+        """A vertically scrolling frame inside ``parent``, registered for the wheel."""
+        viewport = tk.Canvas(parent, bg=BG, highlightthickness=0, borderwidth=0)
+        scrollbar = ttk.Scrollbar(parent, orient="vertical", command=viewport.yview)
+        viewport.configure(yscrollcommand=scrollbar.set)
+        scrollbar.pack(side="right", fill="y")
+        viewport.pack(side="left", fill="both", expand=True)
+        inner = ttk.Frame(viewport)
+        window = viewport.create_window((0, 0), window=inner, anchor="nw")
+        inner.bind("<Configure>",
+                   lambda _event: viewport.configure(scrollregion=viewport.bbox("all")))
+        viewport.bind("<Configure>",
+                      lambda event: viewport.itemconfigure(window, width=event.width))
+        self._scroll_areas.append((tab, viewport))
+        return inner
+
+    def _scroll_target(self, widget):
+        """The registered scroll canvas under ``widget`` on the visible tab."""
+        if widget is None:
+            return None
+        selected = self.nb.select()
+        path = str(widget)
+        for tab, viewport in self._scroll_areas:
+            if str(tab) == selected and (path == str(viewport)
+                                         or path.startswith(str(viewport) + ".")):
+                return viewport
+        return None
+
+    def _on_mousewheel(self, event):
+        try:
+            target_vp = self._scroll_target(
+                self.winfo_containing(event.x_root, event.y_root))
+        except (KeyError, tk.TclError):
+            target_vp = None
+        if target_vp is None:
+            return
+        bbox = target_vp.bbox("all")
+        if not bbox:
+            return
+        content_height = bbox[3] - bbox[1]
+        visible_height = target_vp.winfo_height()
+        if content_height <= visible_height or visible_height <= 0:
+            return
+        step_pixels = 22.0
+        if event.num == 4:
+            delta_px = -step_pixels
+        elif event.num == 5:
+            delta_px = step_pixels
+        elif event.delta:
+            delta_px = max(-2.5, min(2.5, -(event.delta / 120.0))) * step_pixels
+        else:
+            return
+        fraction = delta_px / (content_height - visible_height)
+        target_vp.yview_moveto(max(0.0, min(1.0, target_vp.yview()[0] + fraction)))
+
+    def _build_studio_tab(self, parent):
+        inner = self._scroll_area(parent, parent)
+        self.studio_panel = StudioPanel(
+            inner, state=self.studio_state, background=SURFACE,
+            preset_dir=PRESET_DIR, on_recipe_loaded=self._apply_loaded_recipe,
+            run_section=self._current_run_section,
+            cli_options=self._cli_options)
+        self.studio_panel.pack(fill="both", expand=True, pady=(0, 12))
+        self.studio_panel.bind(STUDIO_CHANGED, self._on_studio_changed)
+        self._run_controls.extend(self.studio_panel.controls())
+        self._sync_stroke_damage_state()
 
     # ------------------------------------------------------------------
     def _build_generate_tab(self, parent):
-        # Two-column layout: Left pane scrolls controls & Developer Studio,
-        # Right pane stays fixed with Live Preview & Generation Progress.
+        # Two-column layout: the left pane scrolls the run settings, the right
+        # pane holds the live preview, estimates, and progress.
         cols = ttk.Panedwindow(parent, orient="horizontal")
         cols.pack(fill="both", expand=True, padx=8, pady=(4, 4))
-
         left_container = ttk.Frame(cols)
         right_container = ttk.Frame(cols)
         cols.add(left_container, weight=5)
         cols.add(right_container, weight=5)
-
-        # Left pane viewport (independent scrollable canvas for controls)
-        viewport = tk.Canvas(
-            left_container, bg=BG, highlightthickness=0, borderwidth=0
-        )
-        scrollbar = ttk.Scrollbar(
-            left_container, orient="vertical", command=viewport.yview
-        )
-        viewport.configure(yscrollcommand=scrollbar.set)
-        scrollbar.pack(side="right", fill="y")
-        viewport.pack(side="left", fill="both", expand=True)
-
-        left = ttk.Frame(viewport)
-        content_window = viewport.create_window((0, 0), window=left, anchor="nw")
-        left.bind(
-            "<Configure>",
-            lambda _event: viewport.configure(scrollregion=viewport.bbox("all")),
-        )
-        viewport.bind(
-            "<Configure>",
-            lambda event: viewport.itemconfigure(content_window, width=event.width),
-        )
-
-        # Right pane viewport (independent scrollable canvas for preview & progress)
-        right_viewport = tk.Canvas(
-            right_container, bg=BG, highlightthickness=0, borderwidth=0
-        )
-        right_scrollbar = ttk.Scrollbar(
-            right_container, orient="vertical", command=right_viewport.yview
-        )
-        right_viewport.configure(yscrollcommand=right_scrollbar.set)
-        right_scrollbar.pack(side="right", fill="y")
-        right_viewport.pack(side="left", fill="both", expand=True)
-
-        right = ttk.Frame(right_viewport)
-        right_window = right_viewport.create_window((0, 0), window=right, anchor="nw")
-        right.bind(
-            "<Configure>",
-            lambda _event: right_viewport.configure(scrollregion=right_viewport.bbox("all")),
-        )
-        right_viewport.bind(
-            "<Configure>",
-            lambda event: right_viewport.itemconfigure(right_window, width=event.width),
-        )
-
-        self._target_scroll_pos = 0.0
-        self._smooth_scroll_timer = None
-
-        def _on_mousewheel(event):
-            try:
-                if self.nb.index(self.nb.select()) != 0:
-                    return
-            except Exception:
-                pass
-
-            target_vp = viewport
-            try:
-                w = self.winfo_containing(event.x_root, event.y_root)
-                if w and (str(right_container) in str(w) or w == right_container or w == right):
-                    target_vp = right_viewport
-            except Exception:
-                pass
-
-            bbox = target_vp.bbox("all")
-            if not bbox:
-                return
-            content_height = bbox[3] - bbox[1]
-            visible_height = target_vp.winfo_height()
-            if content_height <= visible_height or visible_height <= 0:
-                return
-
-            scrollable_height = content_height - visible_height
-            current_target = target_vp.yview()[0]
-
-            step_pixels = 22.0
-            if event.num == 4:
-                delta_px = -step_pixels
-            elif event.num == 5:
-                delta_px = step_pixels
-            elif event.delta:
-                raw_notches = -(event.delta / 120.0)
-                clamped_notches = max(-2.5, min(2.5, raw_notches))
-                delta_px = clamped_notches * step_pixels
-            else:
-                return
-
-            delta_fraction = delta_px / scrollable_height
-            new_target = max(0.0, min(1.0, current_target + delta_fraction))
-            target_vp.yview_moveto(new_target)
-
-        def _bind_mousewheel(_event=None):
-            self.bind_all("<MouseWheel>", _on_mousewheel)
-            self.bind_all("<Button-4>", _on_mousewheel)
-            self.bind_all("<Button-5>", _on_mousewheel)
-
-        def _unbind_mousewheel(_event=None):
-            self.unbind_all("<MouseWheel>")
-            self.unbind_all("<Button-4>")
-            self.unbind_all("<Button-5>")
-
-        self._bind_gen_mousewheel = _bind_mousewheel
-        self._unbind_gen_mousewheel = _unbind_mousewheel
-        self._gen_viewport = viewport
-
-        _bind_mousewheel()
-
-        def _bind_tree_mousewheel(widget):
-            widget.bind("<MouseWheel>", _on_mousewheel, add="+")
-            widget.bind("<Button-4>", _on_mousewheel, add="+")
-            widget.bind("<Button-5>", _on_mousewheel, add="+")
-            for child in widget.winfo_children():
-                _bind_tree_mousewheel(child)
-
-        self.after(200, lambda: _bind_tree_mousewheel(left_container))
-        self.after(200, lambda: _bind_tree_mousewheel(right_container))
+        left = self._scroll_area(left_container, parent)
+        right = self._scroll_area(right_container, parent)
 
         # ================= LEFT: settings =================================
         # ---- Generation settings -----------------------------------------
@@ -787,33 +613,14 @@ class App(tk.Tk):
         self.sample_mode_cb.bind("<<ComboboxSelected>>", self._on_sample_mode_change)
         self._run_controls.append(self.sample_mode_cb)
 
-        # Degradation Profile Dropdown
-        deg_row = ttk.Frame(card2, style="Card.TFrame")
-        deg_row.pack(fill="x", pady=(0, 8))
-        ttk.Label(deg_row, text="Degradation", style="CardLabel.TLabel", width=13).pack(side="left")
-        self.degradation_by_label = {label: key for key, label in config.DEGRADATION_PROFILES.items()}
-        degradation_labels = list(self.degradation_by_label)
-        self.degradation_var = tk.StringVar(value=config.DEGRADATION_PROFILES[config.DEFAULT_DEGRADATION_PROFILE])
-        self.degradation_cb = ttk.Combobox(
-            deg_row, textvariable=self.degradation_var, values=degradation_labels,
-            state="readonly", width=26)
-        self.degradation_cb.pack(side="left")
-        self.degradation_cb.bind("<<ComboboxSelected>>", self._on_degradation_preset_change)
-        self._run_controls.append(self.degradation_cb)
-
-        # Character Cutoff / Edge Clipping Dropdown
-        clip_row = ttk.Frame(card2, style="Card.TFrame")
-        clip_row.pack(fill="x", pady=(0, 8))
-        ttk.Label(clip_row, text="Char cutoff", style="CardLabel.TLabel", width=13).pack(side="left")
-        self.clipping_by_label = {label: key for key, label in config.EDGE_CLIPPING_OPTIONS.items()}
-        clipping_labels = list(self.clipping_by_label)
-        self.edge_clipping_var = tk.StringVar(value=config.EDGE_CLIPPING_OPTIONS[config.DEFAULT_EDGE_CLIPPING])
-        self.edge_clipping_cb = ttk.Combobox(
-            clip_row, textvariable=self.edge_clipping_var, values=clipping_labels,
-            state="readonly", width=26)
-        self.edge_clipping_cb.pack(side="left")
-        self.edge_clipping_cb.bind("<<ComboboxSelected>>", self._on_clipping_preset_change)
-        self._run_controls.append(self.edge_clipping_cb)
+        recipe_row = ttk.Frame(card2, style="Card.TFrame")
+        recipe_row.pack(fill="x", pady=(0, 8))
+        ttk.Label(recipe_row, text="Recipe", style="CardLabel.TLabel", width=13).pack(side="left")
+        self.recipe_summary = ttk.Label(recipe_row, text="", style="CardLabel.TLabel")
+        self.recipe_summary.pack(side="left", padx=(0, 8))
+        open_studio = ttk.Button(recipe_row, text="Open Studio", style="Quick.TButton",
+                                 command=lambda: self.nb.select(self.tab_studio))
+        open_studio.pack(side="left")
 
         # ---- Advanced Distribution (Splits & Mix) -----------------------
         self._section_label(left, "Advanced Distribution (Splits & Mix)")
@@ -865,92 +672,6 @@ class App(tk.Tk):
             if col_idx >= 2:
                 col_idx = 0
                 row_idx += 1
-
-        # ---- Developer Studio (Custom Parameters) -----------------------
-        dev_hdr_row = ttk.Frame(left)
-        dev_hdr_row.pack(fill="x", pady=(8, 2))
-        ttk.Label(dev_hdr_row, text="DEVELOPER STUDIO (CUSTOM PARAMETERS)", style="Section.TLabel").pack(side="left")
-        
-        # Studio Presets Header Bar
-        preset_frame = ttk.Frame(dev_hdr_row)
-        preset_frame.pack(side="right")
-
-        self.preset_cb = ttk.Combobox(preset_frame, textvariable=self.preset_var, state="readonly", width=16)
-        self.preset_cb.pack(side="left", padx=(0, 4))
-        self._refresh_preset_list()
-
-        load_preset_btn = ttk.Button(
-            preset_frame, text="📂 Load", style="Secondary.TButton",
-            command=self._load_selected_preset)
-        load_preset_btn.pack(side="left", padx=(0, 4))
-        self._run_controls.append(load_preset_btn)
-
-        save_preset_btn = ttk.Button(
-            preset_frame, text="💾 Save", style="Secondary.TButton",
-            command=self._save_current_preset)
-        save_preset_btn.pack(side="left", padx=(0, 4))
-        self._run_controls.append(save_preset_btn)
-
-        self.reset_btn = ttk.Button(
-            preset_frame, text="🔄 Reset", style="Secondary.TButton",
-            command=self._reset_studio_sliders)
-        self.reset_btn.pack(side="left")
-        self._run_controls.append(self.reset_btn)
-
-        card_dev = self._card(left, pady=(0, 4))
-        self.dev_sliders = {}
-        self.dev_labels = {}
-        self.dev_scales = {}
-        self._slider_updating = False
-
-        def _make_slider(parent, spec):
-            row = ttk.Frame(parent, style="Card.TFrame")
-            row.pack(fill="x", pady=(0, 4))
-            ttk.Label(row, text=spec.label, style="CardLabel.TLabel",
-                      width=SLIDER_LABEL_WIDTH).pack(side="left")
-            val_var = tk.DoubleVar(value=spec.default)
-            lbl_var = tk.StringVar(value=self._slider_text(spec.name, spec.default))
-
-            def _on_move(val):
-                if getattr(self, "_slider_updating", False):
-                    return
-                snapped = snap_value(val, spec.step, spec.low, spec.high)
-                if snapped != val_var.get():
-                    val_var.set(snapped)
-                lbl_var.set(self._slider_text(spec.name, snapped))
-                self._on_developer_slider_change(spec.name)
-
-            scale = ttk.Scale(row, from_=spec.low, to=spec.high, variable=val_var,
-                              command=_on_move)
-            scale.pack(side="left", fill="x", expand=True, padx=(0, 6))
-            ttk.Label(row, textvariable=lbl_var, style="CardHint.TLabel", width=7).pack(side="left")
-            self.dev_sliders[spec.name] = val_var
-            self.dev_labels[spec.name] = lbl_var
-            self.dev_scales[spec.name] = scale
-            self._run_controls.append(scale)
-
-        ttk.Label(card_dev, text="Ink, paper and scanner (Ink contrast: lower = more faded)",
-                  style="Sub.TLabel").pack(anchor="w", pady=(0, 4))
-        for spec in DEGRADATION_SLIDER_SPECS:
-            _make_slider(card_dev, spec)
-
-        ttk.Separator(card_dev, orient="horizontal").pack(fill="x", pady=6)
-        ttk.Label(card_dev, text="Character Cutoff / Edge Crops", style="Sub.TLabel").pack(anchor="w", pady=(0, 4))
-        for spec in CROP_SLIDER_SPECS:
-            _make_slider(card_dev, spec)
-
-        ttk.Separator(card_dev, orient="horizontal").pack(fill="x", pady=6)
-        ttk.Label(card_dev, text="Stroke Damage (semi-broken modes only)", style="Sub.TLabel").pack(anchor="w", pady=(0, 4))
-        for spec in STROKE_SLIDER_SPECS:
-            _make_slider(card_dev, spec)
-        self._sync_stroke_damage_state()
-
-        ttk.Separator(card_dev, orient="horizontal").pack(fill="x", pady=6)
-        reset_bottom_btn = ttk.Button(
-            card_dev, text="🔄 Reset All Controls to Default", style="Secondary.TButton",
-            command=self._reset_all_controls)
-        reset_bottom_btn.pack(fill="x", pady=(2, 2))
-        self._run_controls.append(reset_bottom_btn)
 
         frow = ttk.Frame(card2, style="Card.TFrame")
         frow.pack(fill="x", pady=(0, 8))
@@ -1007,6 +728,12 @@ class App(tk.Tk):
             variable=self.zip_var)
         self.zip_check.pack(anchor="w")
         self._run_controls.append(self.zip_check)
+        reset_all_btn = ttk.Button(
+            card3, text="Reset all", style="Secondary.TButton",
+            command=self._reset_all_controls)
+        reset_all_btn.pack(anchor="w", pady=(8, 0))
+        self._run_controls.append(reset_all_btn)
+        self._update_recipe_summary()
 
         # Trace variables for preflight estimate updates
         self.count_var.trace_add("write", lambda *args: self._update_preflight_estimates())
@@ -1169,14 +896,13 @@ class App(tk.Tk):
     # ------------------------------------------------------------------
     # Tab change
     # ------------------------------------------------------------------
+    def _selected_tab(self):
+        """The selected tab widget (compared by identity, never by index)."""
+        return self.nametowidget(self.nb.select())
+
     def _on_tab_change(self, _event=None):
-        if self.nb.index(self.nb.select()) == 1:   # datasets tab
-            if hasattr(self, "_unbind_gen_mousewheel"):
-                self._unbind_gen_mousewheel()
+        if self._selected_tab() is self.tab_datasets:
             self._refresh_datasets()
-        else:
-            if hasattr(self, "_bind_gen_mousewheel"):
-                self._bind_gen_mousewheel()
 
     # ------------------------------------------------------------------
     # Font-style preview
@@ -1320,15 +1046,9 @@ class App(tk.Tk):
         """Enable the Stroke Damage sliders only in semi-broken modes."""
         if self.__dict__.get("_run_control_states"):
             return  # a job is running; _set_job_active restores and resyncs
-        state = (
-            "normal" if self._current_sample_mode().startswith("semi_broken")
-            else "disabled"
-        )
-        scales = self.__dict__.get("dev_scales", {})
-        for name in STROKE_DAMAGE_SLIDERS:
-            scale = scales.get(name)
-            if scale is not None:
-                scale.config(state=state)
+        panel = self.__dict__.get("studio_panel")
+        if panel is not None:
+            panel.set_stroke_enabled(self._current_sample_mode().startswith("semi_broken"))
 
     def _on_sample_mode_change(self, _event=None):
         self._sync_stroke_damage_state()
@@ -1355,180 +1075,77 @@ class App(tk.Tk):
                       "your edits were replaced."),
                 foreground=WARNING)
 
-    @staticmethod
-    def _slider_text(name: str, value: float) -> str:
-        spec = SLIDER_SPECS[name]
-        return format_value(value, spec.step, spec.unit)
+    # ------------------------------------------------------------------
+    # Studio state
+    # ------------------------------------------------------------------
+    def _on_studio_changed(self, _event=None):
+        self.studio_state = self.studio_panel.get_state()
+        self._update_recipe_summary()
+        self._update_preview()
 
-    def _recipe_override(self, section: str):
-        """The loaded recipe's section, kept until that group is edited."""
-        return (self.__dict__.get("_recipe_sections") or {}).get(section)
+    def _set_studio_state(self, state: StudioState):
+        self.studio_state = state
+        panel = self.__dict__.get("studio_panel")
+        if panel is not None:
+            panel.set_state(state)
+        self._update_recipe_summary()
 
-    def _drop_recipe_override(self, *sections: str):
-        overrides = self.__dict__.get("_recipe_sections")
-        if overrides:
-            for section in sections:
-                overrides.pop(section, None)
-
-    def _slider_value(self, name: str) -> float:
-        """A slider's value snapped to its step."""
-        spec = SLIDER_SPECS[name]
-        return snap_value(self.dev_sliders[name].get(), spec.step, spec.low, spec.high)
-
-    def _slider_stroke_damage_profile(self) -> StrokeDamageProfile:
-        return StrokeDamageProfile.from_legacy_params({
-            "contrast_prob": self._slider_value("contrast"),
-            "gap_prob": self._slider_value("gap_prob"),
-            "gap_count": int(round(self._slider_value("gap_count"))),
-            "scratch_prob": self._slider_value("scratch"),
-            "erode_prob": self._slider_value("erode"),
-        })
+    def _update_recipe_summary(self):
+        label = self.__dict__.get("recipe_summary")
+        if label is None:
+            return
+        state = self.studio_state
+        marker = "*" if state.dirty else ""
+        based_on = state.augmentation_profile().profile_id
+        label.config(text=f"{state.source_name}{marker} - based on {based_on}")
 
     def _build_stroke_damage_profile(self):
         """Stroke damage profile, or None outside semi-broken modes."""
-        if not hasattr(self, "dev_sliders"):
-            return None
         if not self._current_sample_mode().startswith("semi_broken"):
             return None
-        override = self._recipe_override("stroke_damage")
-        if override is not None:
-            return stroke_damage_from_spec(override)
-        return self._slider_stroke_damage_profile()
+        return self.studio_state.stroke_damage_profile()
 
     def _build_custom_developer_profile(self):
-        override = self._recipe_override("augmentation")
-        if override is not None:
-            return augmentation_profile_from_spec(override)
-        if not hasattr(self, "dev_sliders"):
-            degradation_key = self.degradation_by_label.get(
-                self.degradation_var.get(), config.DEFAULT_DEGRADATION_PROFILE
-            )
-            return get_augmentation_profile(degradation_key)
-
-        preset_key = self.degradation_by_label.get(self.degradation_var.get(), "")
-        if preset_key and preset_key != "custom_dev_v1" and preset_key in AUGMENTATION_PROFILES:
-            return get_augmentation_profile(preset_key)
-
-        # Interim mapping of the single-value sliders: chance 1.0 and
-        # min = max, with a content-addressed profile ID.
-        return augmentation_profile_from_spec(augmentation_spec_from_legacy_values(
-            fade_contrast=self._slider_value("fade"),
-            paper_tint_alpha=self._slider_value("tint"),
-            stain_prob=self._slider_value("stain"),
-            rotate_deg=self._slider_value("rotate"),
-            blur_radius=self._slider_value("blur"),
-            noise_std=self._slider_value("noise"),
-            paper_texture_std=self._slider_value("texture"),
-            scanline_alpha=int(round(self._slider_value("scanline"))),
-            jpeg_quality=int(round(self._slider_value("jpeg"))),
-        ))
+        return self.studio_state.augmentation_profile()
 
     def _build_cutoff_profile(self):
-        """The selected cutoff profile.
+        return self.studio_state.cutoff_profile()
 
-        Custom sliders give each nonzero side chance 1.0 and min = max, as a
-        fraction of the ink box (interim; ranges arrive with the studio UI).
+    def _apply_loaded_recipe(self, key: str, recipe: StudioRecipe):
+        """Apply a loaded preset: its effect sections to the studio, its run
+        section to the Generate tab.  Only sections the recipe contains change.
         """
-        override = self._recipe_override("cutoff")
-        if override is not None:
-            return cutoff_profile_from_spec(override)
-        preset_key = self.clipping_by_label.get(self.edge_clipping_var.get(), "none")
-        if preset_key in CUTOFF_PROFILES or not hasattr(self, "dev_sliders"):
-            return CUTOFF_PROFILES.get(preset_key, CUTOFF_PROFILES["none"])
-        return as_cutoff_profile(tuple(
-            self._slider_value(spec.name) / 100.0 for spec in CROP_SLIDER_SPECS))
+        self._set_studio_state(self.studio_state.loaded(
+            recipe, source_name=recipe.name or key, source_key=key))
+        if recipe.run is not None:
+            self._apply_run_section(recipe.run)
+        self._sync_stroke_damage_state()
+        self._update_preview()
+        sections = ", ".join(recipe.sections) or "no sections"
+        name = recipe.name or key
+        self.status.config(text=f"Loaded preset {name}: {sections}.", foreground=SUCCESS)
 
-    @staticmethod
-    def _profile_slider_values(profile_key: str) -> dict[str, float]:
-        """Degradation slider values for a registered profile (range midpoints).
-
-        Unregistered keys, such as the custom studio profile, give the
-        slider defaults.
-        """
-        prof = AUGMENTATION_PROFILES.get(profile_key)
-        if prof is None:
-            return {spec.name: spec.default for spec in DEGRADATION_SLIDER_SPECS}
-
-        def mid(values):
-            return (values[0] + values[1]) / 2.0
-
+    def _current_run_section(self) -> dict:
+        """The Generate tab's run settings as a recipe ``run`` section."""
+        options = self._snapshot_run_options()
         return {
-            "fade": mid(prof.fade_range),
-            "tint": mid(prof.paper_tint_alpha_range),
-            "stain": prof.stain_probability,
-            "rotate": prof.rotate_degrees,
-            "blur": mid(prof.blur_radius_range),
-            "noise": mid(prof.noise_std_range),
-            "texture": mid(prof.paper_texture_std_range),
-            "scanline": mid(prof.scanline_alpha_range),
-            "jpeg": mid(prof.jpeg_quality_range),
+            "sample_mode": options.sample_mode,
+            "field_weights": {k: v for k, v in (options.custom_field_weights or {}).items()
+                              if v},
+            "split_fractions": list(options.custom_split_fractions
+                                    or config.synthetic_split_fractions()),
+            "font_style": options.font_style,
+            "cursive_group": options.cursive_group,
+            "specific_font": options.specific_font,
+            "names_version": options.names_version or config.NAMES_VERSION,
+            "writer_profile": options.writer_profile,
+            "samples_per_writer": options.samples_per_writer,
         }
 
-    def _set_slider_values(self, values: dict[str, float]):
-        """Set sliders (snapped) and labels without triggering slider callbacks."""
-        self._slider_updating = True
-        try:
-            for name, raw in values.items():
-                spec = SLIDER_SPECS[name]
-                value = snap_value(raw, spec.step, spec.low, spec.high)
-                self.dev_sliders[name].set(value)
-                self.dev_labels[name].set(self._slider_text(name, value))
-        finally:
-            self._slider_updating = False
-
-    def _selected_degradation_key(self) -> str:
-        return self.degradation_by_label.get(
-            self.degradation_var.get(), config.DEFAULT_DEGRADATION_PROFILE)
-
-    def _on_degradation_preset_change(self, _event=None):
-        self._drop_recipe_override("augmentation")
-        preset_key = self._selected_degradation_key()
-        if preset_key in AUGMENTATION_PROFILES and hasattr(self, "dev_sliders"):
-            self._set_slider_values(self._profile_slider_values(preset_key))
-        self._update_preview()
-
-    def _on_clipping_preset_change(self, _event=None):
-        self._drop_recipe_override("cutoff")
-        preset_label = self.edge_clipping_var.get()
-        preset_key = self.clipping_by_label.get(preset_label, "none")
-        if preset_key in CUTOFF_PROFILES and hasattr(self, "dev_sliders"):
-            # Interim: show each side's range midpoint (0 for sides never cut).
-            profile = CUTOFF_PROFILES[preset_key]
-            self._set_slider_values({
-                f"crop_{name}": (
-                    (side.fraction_range[0] + side.fraction_range[1]) / 2.0 * 100.0
-                    if side.active else 0.0)
-                for name, side in profile.sides()
-            })
-        self._update_preview()
-
-    def _on_developer_slider_change(self, slider_name=""):
-        if getattr(self, "_slider_updating", False):
-            return
-        if slider_name.startswith("crop_"):
-            self._drop_recipe_override("cutoff")
-            if "custom" in self.clipping_by_label.values():
-                self.edge_clipping_var.set(config.EDGE_CLIPPING_OPTIONS["custom"])
-        elif slider_name in STROKE_DAMAGE_SLIDERS:
-            self._drop_recipe_override("stroke_damage")
-        else:
-            self._drop_recipe_override("augmentation")
-            if "custom_dev_v1" in self.degradation_by_label.values():
-                self.degradation_var.set(config.DEGRADATION_PROFILES["custom_dev_v1"])
-        self._update_preview()
-
-    def _reset_studio_sliders(self):
-        """Reset only the studio sliders.
-
-        Degradation sliders take the selected profile's values; crop and
-        stroke-damage sliders return to their defaults.
-        """
-        self._drop_recipe_override("augmentation", "stroke_damage", "cutoff")
-        values = self._profile_slider_values(self._selected_degradation_key())
-        for spec in (*CROP_SLIDER_SPECS, *STROKE_SLIDER_SPECS):
-            values[spec.name] = spec.default
-        self._set_slider_values(values)
-        self._update_preview()
+    def _cli_options(self) -> dict:
+        """Count and seed for a copied CLI command."""
+        return {"count": self.count_var.get().replace(",", "").strip(),
+                "seed": self.seed_var.get().strip()}
 
     def _reset_all_controls(self):
         """Reset every Generate-tab control, including weights and splits."""
@@ -1539,8 +1156,6 @@ class App(tk.Tk):
         self.split_val_var.set(_split_percent(config.SYNTH_VAL_FRAC))
         self.split_test_var.set(_split_percent(config.SYNTH_TEST_FRAC))
         self._update_split_sum_label()
-        self.degradation_var.set(config.DEGRADATION_PROFILES[config.DEFAULT_DEGRADATION_PROFILE])
-        self.edge_clipping_var.set(config.EDGE_CLIPPING_OPTIONS[config.DEFAULT_EDGE_CLIPPING])
         self.count_var.set(str(config.DEFAULT_COUNT))
         self.seed_var.set(str(config.RANDOM_SEED))
         if hasattr(self, "workers_var"):
@@ -1551,7 +1166,11 @@ class App(tk.Tk):
         self._on_font_style_change()
         self.real_var.set(False)
         self.zip_var.set(False)
-        self._reset_studio_sliders()
+        self._run_writer_profile = DEFAULT_WRITER_PROFILE_ID
+        self._run_samples_per_writer = 32
+        self._set_studio_state(StudioState.default())
+        self._sync_stroke_damage_state()
+        self._update_preview()
 
     def _update_preflight_estimates(self, _event=None):
         if not hasattr(self, "est_folder_lbl"):
@@ -1624,73 +1243,6 @@ class App(tk.Tk):
         except ValueError:
             self.split_sum_lbl.config(text="Invalid numbers", foreground=ERROR_C)
 
-    def _refresh_preset_list(self):
-        """List built-in presets, then user presets (shown as user/<name>)."""
-        entries = list_presets(PRESET_DIR, PRESET_DIR / "user")
-        self._preset_entries = {entry.key: entry for entry in entries}
-        names = list(self._preset_entries)
-        if hasattr(self, "preset_cb"):
-            self.preset_cb.config(values=names)
-            if names and not self.preset_var.get():
-                self.preset_var.set(names[0])
-
-    def _load_selected_preset(self):
-        name = self.preset_var.get()
-        if not name:
-            return
-        try:
-            entry = find_preset(name, PRESET_DIR, PRESET_DIR / "user")
-        except FileNotFoundError as exc:
-            messagebox.showerror("Error", str(exc))
-            return
-        try:
-            recipe = load_recipe(entry.path)
-        except RecipeError as exc:
-            messagebox.showerror("Error loading preset", str(exc))
-            return
-        self._apply_recipe_to_studio(name, recipe)
-
-    def _apply_recipe_to_studio(self, name: str, recipe: StudioRecipe):
-        """Apply only the sections a recipe contains, all at once.
-
-        Interim (until the Studio tab): effect sections drive runs directly
-        and are mirrored onto the single-value sliders for display.
-        """
-        overrides = dict(self.__dict__.get("_recipe_sections") or {})
-        self._slider_updating = True
-        try:
-            for key, raw in recipe_slider_values(recipe).items():
-                spec = SLIDER_SPECS[key]
-                value = snap_value(raw, spec.step, spec.low, spec.high)
-                self.dev_sliders[key].set(value)
-                self.dev_labels[key].set(self._slider_text(key, value))
-            if recipe.augmentation is not None:
-                overrides["augmentation"] = recipe.section("augmentation")
-                self.degradation_var.set(config.DEGRADATION_PROFILES["custom_dev_v1"])
-            if recipe.stroke_damage is not None:
-                overrides["stroke_damage"] = recipe.section("stroke_damage")
-            if recipe.cutoff is not None:
-                cutoff = recipe.section("cutoff")
-                active = any(cutoff[side]["probability"] > 0
-                             for side in studio_spec.CUTOFF_SIDES)
-                if active:
-                    overrides["cutoff"] = cutoff
-                else:
-                    overrides.pop("cutoff", None)
-                self.edge_clipping_var.set(
-                    config.EDGE_CLIPPING_OPTIONS["custom" if active else "none"])
-            if recipe.run is not None:
-                self._apply_run_section(recipe.run)
-        finally:
-            self._slider_updating = False
-        self._recipe_sections = overrides
-        self._loaded_recipe = recipe
-        self._loaded_recipe_key = name
-        self._sync_stroke_damage_state()
-        self._update_preview()
-        sections = ", ".join(recipe.sections) or "no sections"
-        self.status.config(text=f"Loaded preset {name}: {sections}.", foreground=SUCCESS)
-
     def _apply_run_section(self, run: dict):
         """Apply a recipe's run settings to the Generate-tab controls."""
         if "sample_mode" in run:
@@ -1720,57 +1272,6 @@ class App(tk.Tk):
         for key in ("writer_profile", "samples_per_writer"):
             if key in run:
                 setattr(self, f"_run_{key}", run[key])
-
-    def _current_recipe(self, name: str = "", description: str = "") -> StudioRecipe:
-        """The studio state as a recipe with all three effect sections."""
-        augmentation = (self._recipe_override("augmentation")
-                        or augmentation_spec_from_profile(
-                            self._build_custom_developer_profile()))
-        stroke = (self._recipe_override("stroke_damage")
-                  or stroke_damage_spec_from_profile(self._slider_stroke_damage_profile()))
-        cutoff = (self._recipe_override("cutoff")
-                  or cutoff_spec_from_profile(self._build_cutoff_profile()))
-        return parse_recipe({
-            "format": "synthetic-generator.studio-recipe",
-            "schema_version": 2,
-            "name": name,
-            "description": description,
-            "augmentation": augmentation,
-            "stroke_damage": stroke,
-            "cutoff": cutoff,
-        })
-
-    def _save_current_preset(self):
-        name = simpledialog.askstring(
-            "Save Preset", "Enter a name for this Developer Studio preset:")
-        if name is None:
-            return
-        try:
-            slug = preset_slug(name)
-            recipe = self._current_recipe(name.strip())
-        except ValueError as exc:
-            messagebox.showerror("Invalid preset name", str(exc))
-            return
-        dirs = {"builtin_dir": PRESET_DIR, "user_dir": PRESET_DIR / "user"}
-        try:
-            try:
-                save_user_preset(recipe, name, **dirs)
-            except PresetExistsError:
-                if not messagebox.askyesno(
-                        "Overwrite preset",
-                        f"A user preset named '{slug}' already exists. Replace it?",
-                        icon="warning"):
-                    return
-                save_user_preset(recipe, name, overwrite=True, **dirs)
-        except ReadOnlyPresetError as exc:
-            messagebox.showerror("Invalid preset name", str(exc))
-            return
-        except (OSError, ValueError) as exc:
-            messagebox.showerror("Error saving preset", str(exc))
-            return
-        self._refresh_preset_list()
-        self.preset_var.set(f"user/{slug}")
-        self.status.config(text=f"Saved preset: user/{slug}", foreground=SUCCESS)
 
     def _get_selected_dataset_folder(self):
         selected = self.tree.selection()
@@ -2373,8 +1874,8 @@ class App(tk.Tk):
             writer_profile=self.__dict__.get(
                 "_run_writer_profile", DEFAULT_WRITER_PROFILE_ID),
             samples_per_writer=self.__dict__.get("_run_samples_per_writer", 32),
-            recipe=self.__dict__.get("_loaded_recipe"),
-            recipe_source=self.__dict__.get("_loaded_recipe_key"),
+            recipe=self.studio_state.baseline_recipe(),
+            recipe_source=self.studio_state.source_key or self.studio_state.source_name,
         )
 
     @staticmethod

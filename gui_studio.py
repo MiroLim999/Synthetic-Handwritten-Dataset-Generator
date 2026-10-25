@@ -52,9 +52,14 @@ class StudioPanel(ttk.Frame):
     def __init__(self, master, *, state: StudioState | None = None,
                  card_style: str = "Card.TFrame", label_style: str = "CardLabel.TLabel",
                  hint_style: str = "CardHint.TLabel", section_style: str = "Section.TLabel",
-                 background: str = "#ffffff"):
+                 background: str = "#ffffff", preset_dir=None,
+                 on_recipe_loaded=None, run_section=None, cli_options=None):
         super().__init__(master)
         self._state = state or StudioState.default()
+        self._preset_dir = preset_dir
+        self._on_recipe_loaded = on_recipe_loaded
+        self._run_section = run_section
+        self._cli_options = cli_options
         self._styles = {"card": card_style, "label": label_style, "hint": hint_style,
                         "section": section_style}
         self._background = background
