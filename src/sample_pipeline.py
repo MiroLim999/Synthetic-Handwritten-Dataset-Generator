@@ -9,17 +9,19 @@ generator always has, so a preview tile is the image a run would write.
 from __future__ import annotations
 
 import random
-from collections.abc import Callable
+from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
 from PIL import Image
 
+import config
 from src import fields
 from src.augment import degrade_detailed
 from src.cutoff import CutoffResult
 from src.dataset_validation import assess_image_quality
+from src.generation_io import SyntheticWriterAssigner, iter_generation_plan
 from src.generation_profiles import (AugmentationProfile, CutoffProfile,
                                      StrokeDamageProfile, WriterStyle)
 from src.render import render_text
@@ -28,6 +30,45 @@ MAX_SAMPLE_ATTEMPTS = 20
 # Attempts after this number drop stroke damage and cutoff so huge runs never
 # fail on one stubborn sample.
 SAFE_FALLBACK_AFTER_ATTEMPT = 15
+
+
+@dataclass(frozen=True)
+class PlannedSample:
+    """One entry of a run plan: what to generate, where, and from which seed."""
+
+    index: int
+    field_type: str
+    split: str
+    file_name: str
+    writer_id: str
+    item_seed: int
+
+    @property
+    def relative_path(self) -> str:
+        return f"{self.split}/{self.file_name}"
+
+
+def item_seed_for(seed: int, index: int) -> int:
+    """Per-sample seed; independent of worker count and scheduling."""
+    return (seed + index * 1_000_003) & 0x7FFFFFFF
+
+
+def iter_run_plan(count: int, seed: int, field_weights: Mapping[str, float],
+                  split_fractions, writer_assigner: SyntheticWriterAssigner,
+                  ) -> Iterator[PlannedSample]:
+    """The exact sample plan a run with these settings follows."""
+    rng = random.Random(seed)
+    split_counts = config.allocate_split_counts(count, split_fractions)
+    for item in iter_generation_plan(count, field_weights, split_counts, rng,
+                                     split_order=config.SPLIT_NAMES):
+        yield PlannedSample(
+            index=item.index,
+            field_type=item.field_type,
+            split=item.split,
+            file_name=f"syn_{item.index:06d}.png",
+            writer_id=writer_assigner.writer_id_for(item.split),
+            item_seed=item_seed_for(seed, item.index),
+        )
 
 
 @dataclass(frozen=True)

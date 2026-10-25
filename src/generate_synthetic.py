@@ -62,8 +62,7 @@ from src.image_preprocessing import (PREPROCESSING_ID, TROCR_IMAGE_SIZE,
 from src.image_statistics import (compare_image_statistics, iter_image_paths,
                                   summarize_image_statistics)
 from src.generation_io import (AtomicCsvWriter, GenerationCounters,
-                               SyntheticWriterAssigner, iter_generation_plan,
-                               verify_sha256_sidecar, write_sha256_sidecar)
+                               SyntheticWriterAssigner, verify_sha256_sidecar, write_sha256_sidecar)
 from src.generation_profiles import (AUGMENTATION_PROFILES, CUTOFF_PROFILES,
                                      DEFAULT_AUGMENTATION_PROFILE_ID,
                                      DEFAULT_WRITER_PROFILE_ID,
@@ -96,7 +95,9 @@ from src.provenance import (atomic_write_json, configuration_snapshot,
                             utc_now_iso)
 from src.render import (CURSIVE_STYLE_GROUPS, FONT_STYLES,
                         font_path_for, fonts_for_style)
-from src.sample_pipeline import MAX_SAMPLE_ATTEMPTS, generate_valid_sample  # noqa: F401
+from src.sample_pipeline import (MAX_SAMPLE_ATTEMPTS,  # noqa: F401
+                                 generate_valid_sample, item_seed_for,
+                                 iter_run_plan)
 from src.split_policy import (EVALUATION_ANNOTATION_COLUMNS,
                               build_synthetic_evaluation_policy)
 
@@ -234,6 +235,19 @@ def _preflight_generation(count: int, names_version: str | None,
     return sample_mode, names_dir
 
 
+def effective_fonts_for(font_style: str, cursive_group: str,
+                        specific_font: str) -> tuple[str, ...]:
+    """The font files a run renders with."""
+    fonts = (
+        (font_path_for(specific_font),)
+        if specific_font
+        else fonts_for_style(font_style, cursive_group)
+    )
+    if not all(fonts):
+        raise ValueError("The effective font selection contains an unavailable font")
+    return tuple(str(font) for font in fonts)
+
+
 def _normalize_sample_mode(sample_mode: str | None) -> str:
     """Return a valid sample mode, falling back to the configured default."""
     sample_mode = sample_mode or config.DEFAULT_SAMPLE_MODE
@@ -337,7 +351,7 @@ def _process_one_worker_task(task_args):
 
     names_dir = Path(names_dir_str)
     out_file = Path(out_file_str)
-    item_seed = (seed + i * 1_000_003) & 0x7FFFFFFF
+    item_seed = item_seed_for(seed, i)
     item_rng = random.Random(item_seed)
     item_np_rng = np.random.default_rng(item_seed)
 
@@ -761,14 +775,7 @@ def generate(count: int, dataset=None, seed: int = config.RANDOM_SEED,
         raise ValueError("archive_planned must be a boolean")
     _raise_if_cancelled(cancel_event)
 
-    effective_fonts = (
-        (font_path_for(specific_font),)
-        if specific_font
-        else fonts_for_style(font_style, cursive_group)
-    )
-    if not all(effective_fonts):
-        raise ValueError("The effective font selection contains an unavailable font")
-    effective_fonts = tuple(str(font) for font in effective_fonts)
+    effective_fonts = effective_fonts_for(font_style, cursive_group, specific_font)
     writer_profile = resolved.writer_profile
     augmentation_profile = resolved.augmentation_profile
     cutoff_profile = resolved.cutoff_profile
@@ -784,7 +791,6 @@ def generate(count: int, dataset=None, seed: int = config.RANDOM_SEED,
         large_job_count=config.LARGE_GENERATION_WARNING_COUNT,
     )
     evaluation_policy = build_synthetic_evaluation_policy(effective_fonts, seed)
-    rng = random.Random(seed)
     generation_started_at = utc_now_iso()
 
     reservation = None
@@ -829,25 +835,19 @@ def generate(count: int, dataset=None, seed: int = config.RANDOM_SEED,
         split_counts = config.allocate_split_counts(count, split_fractions)
         field_weights = resolved.field_weights
         counters = GenerationCounters()
-        plan_items = list(iter_generation_plan(
-            count,
-            field_weights,
-            split_counts,
-            rng,
-            split_order=config.SPLIT_NAMES,
-        ))
 
         # Pre-assign writer IDs and seeds sequentially for 100% thread/process safety & test determinism
         task_items = []
         work_items = []
-        for item in plan_items:
+        for item in iter_run_plan(count, seed, field_weights, split_fractions,
+                                  writer_assigner):
             i, field_type, split = item.index, item.field_type, item.split
-            file_name = f"syn_{i:06d}.png"
-            synthetic_writer_id = writer_assigner.writer_id_for(split)
+            file_name = item.file_name
+            synthetic_writer_id = item.writer_id
             style = writer_style_for(
                 synthetic_writer_id, seed, writer_profile
             )
-            item_seed = (seed + i * 1_000_003) & 0x7FFFFFFF
+            item_seed = item.item_seed
             out_file = split_dirs[split] / file_name
             work_items.append((item, file_name, synthetic_writer_id, style, item_seed))
             task_items.append((
