@@ -357,6 +357,38 @@ def apply_recipe(settings: Mapping, recipe: StudioRecipe) -> dict:
     return result
 
 
+def compose_settings(recipe: StudioRecipe | None = None, *,
+                     overrides: Mapping[str, Mapping] | None = None) -> dict:
+    """Resolve settings in precedence order: defaults < recipe < overrides.
+
+    ``overrides`` maps a section name to explicit values (CLI flags or GUI
+    edits).  An effect-section override replaces that whole section; a
+    ``run`` override merges its keys.  Overrides are validated like recipe
+    sections and raise :class:`RecipeError` with JSON paths.
+    """
+    settings = default_settings()
+    if recipe is not None:
+        settings = apply_recipe(settings, recipe)
+    errors: list[str] = []
+    for section, values in (overrides or {}).items():
+        if section in EFFECT_SECTIONS:
+            normalized, problems = studio_spec.validate_section(section, values)
+            normalized.pop("based_on", None)
+        elif section == "run":
+            normalized, problems = validate_run(values)
+            normalized = {**settings["run"], **normalized}
+            if "sample_mode" in values and "field_weights" not in values:
+                normalized["field_weights"] = None
+        else:
+            problems = [f"{section}: unknown section"]
+        errors.extend(problems)
+        if not problems:
+            settings[section] = normalized
+    if errors:
+        raise RecipeError(errors, "settings")
+    return settings
+
+
 def resolved_recipe(settings: Mapping, *, name: str = "",
                     description: str = "") -> StudioRecipe:
     """A recipe holding every section of ``settings``."""
