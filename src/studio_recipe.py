@@ -27,10 +27,13 @@ from src import studio_spec
 from src.generation_profiles import (DEFAULT_AUGMENTATION_PROFILE_ID,
                                      DEFAULT_WRITER_PROFILE_ID,
                                      WRITER_STYLE_PROFILES,
+                                     augmentation_profile_from_spec,
                                      augmentation_spec_from_legacy_values,
                                      augmentation_spec_from_profile,
-                                     canonical_json, cutoff_spec_from_profile,
+                                     canonical_json, cutoff_profile_from_spec,
+                                     cutoff_spec_from_profile,
                                      stroke_damage_from_config,
+                                     stroke_damage_from_spec,
                                      stroke_damage_spec_from_profile)
 from src.provenance import atomic_write_json
 from src.render import CURSIVE_STYLE_GROUPS, FONT_STYLE_ALL, FONT_STYLES
@@ -567,3 +570,117 @@ def export_preset(entry: PresetEntry, destination: str | Path) -> Path:
     destination = Path(destination)
     save_recipe(destination, load_recipe(entry.path))
     return destination
+
+
+# ---------------------------------------------------------------------------
+# Studio state (what the Studio tab edits)
+# ---------------------------------------------------------------------------
+@dataclass(frozen=True)
+class StudioState:
+    """The three effect sections being edited, plus where they came from.
+
+    ``baseline`` holds the sections as last loaded (a preset or a base
+    profile); any difference from it makes the state dirty, shown as
+    "custom (based on X)".  The run section lives on the Generate tab.
+    """
+
+    augmentation: dict
+    stroke_damage: dict
+    cutoff: dict
+    source_name: str = DEFAULT_AUGMENTATION_PROFILE_ID
+    source_key: str | None = None
+    baseline: dict = field(default_factory=dict, compare=False)
+
+    @classmethod
+    def default(cls) -> "StudioState":
+        settings = default_settings()
+        sections = {name: settings[name] for name in EFFECT_SECTIONS}
+        return cls(**copy.deepcopy(sections), baseline=copy.deepcopy(sections))
+
+    def sections(self) -> dict[str, dict]:
+        return {name: copy.deepcopy(getattr(self, name)) for name in EFFECT_SECTIONS}
+
+    def with_section(self, section: str, data: Mapping) -> "StudioState":
+        """A new state with one section replaced (validated, defaults filled)."""
+        normalized = studio_spec.require_valid_section(section, data)
+        normalized.pop("based_on", None)
+        return replace(self, **{section: normalized})
+
+    def with_value(self, spec: studio_spec.ParamSpec, value) -> "StudioState":
+        section = copy.deepcopy(getattr(self, spec.section))
+        studio_spec.set_value(section, spec, value)
+        return self.with_section(spec.section, section)
+
+    def value(self, spec: studio_spec.ParamSpec):
+        return studio_spec.get_value(getattr(self, spec.section), spec)
+
+    def loaded(self, recipe: StudioRecipe, *, source_name: str,
+               source_key: str | None = None) -> "StudioState":
+        """Apply a recipe's effect sections; the result is the new baseline."""
+        state = self
+        for name in EFFECT_SECTIONS:
+            section = recipe.section(name)
+            if section is not None:
+                state = state.with_section(name, section)
+        return replace(state, source_name=source_name, source_key=source_key,
+                       baseline=state.sections())
+
+    def with_base_profile(self, profile_id: str) -> "StudioState":
+        """Load a built-in augmentation profile's exact values."""
+        state = self.with_section("augmentation", augmentation_spec_from_profile(profile_id))
+        baseline = {**self.baseline, "augmentation": state.sections()["augmentation"]}
+        return replace(state, source_name=profile_id, source_key=None, baseline=baseline)
+
+    def reset_section(self, section: str, specs=None) -> "StudioState":
+        """Return ``section`` (or only ``specs`` of it) to the baseline values."""
+        baseline = self.baseline.get(section) or default_settings()[section]
+        if specs is None:
+            return self.with_section(section, baseline)
+        state = self
+        for spec in specs:
+            state = state.with_value(spec, studio_spec.get_value(baseline, spec))
+        return state
+
+    @property
+    def dirty_sections(self) -> tuple[str, ...]:
+        return tuple(name for name in EFFECT_SECTIONS
+                     if getattr(self, name) != self.baseline.get(name))
+
+    @property
+    def dirty(self) -> bool:
+        return bool(self.dirty_sections)
+
+    @property
+    def label(self) -> str:
+        return f"custom (based on {self.source_name})" if self.dirty else self.source_name
+
+    def to_recipe(self, name: str = "", description: str = "", *,
+                  sections=EFFECT_SECTIONS, run: Mapping | None = None) -> StudioRecipe:
+        """A recipe with the chosen sections (and optionally a run section)."""
+        data: dict[str, object] = {
+            "format": RECIPE_FORMAT, "schema_version": RECIPE_SCHEMA_VERSION,
+            "name": name, "description": description,
+        }
+        for section in sections:
+            data[section] = copy.deepcopy(getattr(self, section))
+        if run is not None:
+            data["run"] = {key: value for key, value in run.items() if value is not None}
+        return parse_recipe(data)
+
+    def augmentation_profile(self):
+        return augmentation_profile_from_spec(self.augmentation)
+
+    def stroke_damage_profile(self):
+        return stroke_damage_from_spec(self.stroke_damage)
+
+    def cutoff_profile(self):
+        return cutoff_profile_from_spec(self.cutoff)
+
+    def baseline_recipe(self) -> StudioRecipe:
+        """The loaded source as a recipe (used to record whether a run changed it)."""
+        return parse_recipe({
+            "format": RECIPE_FORMAT, "schema_version": RECIPE_SCHEMA_VERSION,
+            "name": self.source_name, "description": "",
+            **{name: copy.deepcopy(self.baseline.get(name) or getattr(self, name))
+               for name in EFFECT_SECTIONS},
+        })
