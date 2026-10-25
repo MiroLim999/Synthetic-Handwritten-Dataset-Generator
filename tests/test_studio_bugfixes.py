@@ -18,6 +18,7 @@ import config
 import gui
 from src.augment import degrade
 from src.generate_synthetic import field_weights_for_mode, generate
+from src.generation_profiles import StrokeDamageProfile
 from src.generation_io import iter_generation_plan
 from tests.studio_fakes import studio_app
 
@@ -46,14 +47,16 @@ class RegularModeStrokeDamageTests(unittest.TestCase):
                             semi_broken_params=params)
             self.assertEqual(plain.tobytes(), tuned.tobytes(), profile)
 
-    def test_snapshot_passes_stroke_params_only_in_semi_broken_modes(self):
-        self.assertIsNone(studio_app("regular")._snapshot_run_options().semi_broken_params)
+    def test_snapshot_passes_stroke_damage_only_in_semi_broken_modes(self):
+        self.assertIsNone(
+            studio_app("regular")._snapshot_run_options().stroke_damage_profile)
         for mode in config.SAMPLE_MODES:
             if not mode.startswith("semi_broken"):
                 continue
-            params = studio_app(mode)._snapshot_run_options().semi_broken_params
-            self.assertIsInstance(params, dict, mode)
-            self.assertEqual(params["gap_count"], 16)
+            profile = studio_app(mode)._snapshot_run_options().stroke_damage_profile
+            self.assertIsInstance(profile, StrokeDamageProfile, mode)
+            self.assertEqual(profile.gap_count_range, (1, 16))
+            self.assertEqual(profile.contrast_probability, 0.8)
 
     def test_stroke_sliders_disabled_outside_semi_broken_modes(self):
         app = studio_app("regular")
@@ -267,7 +270,7 @@ class ProvenanceAndParityTests(unittest.TestCase):
                 specific_font=options.specific_font, show_bar=False,
                 augmentation_profile=options.augmentation_profile,
                 edge_clipping=options.edge_clipping,
-                semi_broken_params=options.semi_broken_params,
+                stroke_damage_profile=options.stroke_damage_profile,
                 custom_field_weights=options.custom_field_weights,
                 custom_split_fractions=options.custom_split_fractions,
                 workers=options.workers,

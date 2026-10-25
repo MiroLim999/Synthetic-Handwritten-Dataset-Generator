@@ -32,7 +32,9 @@ import config
 from src import fields
 from src.augment import degrade, EDGE_CLIPPING_RANGES
 from src.generation_profiles import (AUGMENTATION_PROFILES,
-                                     create_custom_augmentation_profile,
+                                     StrokeDamageProfile,
+                                     augmentation_profile_from_spec,
+                                     augmentation_spec_from_legacy_values,
                                      get_augmentation_profile)
 from src.generate_synthetic import (GenerationCancelled, field_weights_for_mode,
                                     generate, guarded_remove_dataset,
@@ -298,7 +300,7 @@ class RunOptions:
     specific_font: str
     augmentation_profile: object
     edge_clipping: object
-    semi_broken_params: dict | None
+    stroke_damage_profile: StrokeDamageProfile | None
     merge_real: bool
     package_zip: bool
     custom_field_weights: dict | None
@@ -1312,7 +1314,7 @@ class App(tk.Tk):
 
         profile = self._build_custom_developer_profile()
         crop_tuple = self._get_custom_crop_tuple()
-        semi_params = self._build_semi_broken_params()
+        stroke_damage = self._build_stroke_damage_profile()
         sample_mode_key = self._current_sample_mode()
         damage_prof = "semi_broken" if sample_mode_key.startswith("semi_broken") else "regular"
         try:
@@ -1321,7 +1323,7 @@ class App(tk.Tk):
                 damage_profile=damage_prof,
                 augmentation_profile=profile,
                 edge_clipping=crop_tuple,
-                semi_broken_params=semi_params,
+                semi_broken_params=stroke_damage,
                 rng=random.Random(seed),
             )
         except Exception:
@@ -1378,19 +1380,19 @@ class App(tk.Tk):
         spec = SLIDER_SPECS[name]
         return format_value(value, spec.step, spec.unit)
 
-    def _build_semi_broken_params(self):
-        """Stroke damage params, or None outside semi-broken modes."""
+    def _build_stroke_damage_profile(self):
+        """Stroke damage profile, or None outside semi-broken modes."""
         if not hasattr(self, "dev_sliders"):
             return None
         if not self._current_sample_mode().startswith("semi_broken"):
             return None
-        return {
+        return StrokeDamageProfile.from_legacy_params({
             "contrast_prob": self.dev_sliders["contrast"].get(),
             "gap_prob": self.dev_sliders["gap_prob"].get(),
             "gap_count": int(round(self.dev_sliders["gap_count"].get())),
             "scratch_prob": self.dev_sliders["scratch"].get(),
             "erode_prob": self.dev_sliders["erode"].get(),
-        }
+        })
 
     def _build_custom_developer_profile(self):
         if not hasattr(self, "dev_sliders"):
@@ -1403,7 +1405,9 @@ class App(tk.Tk):
         if preset_key and preset_key != "custom_dev_v1" and preset_key in AUGMENTATION_PROFILES:
             return get_augmentation_profile(preset_key)
 
-        return create_custom_augmentation_profile(
+        # Interim mapping of the single-value sliders: chance 1.0 and
+        # min = max, with a content-addressed profile ID.
+        return augmentation_profile_from_spec(augmentation_spec_from_legacy_values(
             fade_contrast=self.dev_sliders["fade"].get(),
             paper_tint_alpha=self.dev_sliders["tint"].get(),
             stain_prob=self.dev_sliders["stain"].get(),
@@ -1413,7 +1417,7 @@ class App(tk.Tk):
             paper_texture_std=self.dev_sliders["texture"].get(),
             scanline_alpha=int(round(self.dev_sliders["scanline"].get())),
             jpeg_quality=int(round(self.dev_sliders["jpeg"].get())),
-        )
+        ))
 
     def _get_custom_crop_tuple(self):
         if not hasattr(self, "dev_sliders"):
@@ -2281,7 +2285,7 @@ class App(tk.Tk):
             specific_font=specific_font,
             augmentation_profile=self._build_custom_developer_profile(),
             edge_clipping=self._get_custom_crop_tuple(),
-            semi_broken_params=self._build_semi_broken_params(),
+            stroke_damage_profile=self._build_stroke_damage_profile(),
             merge_real=bool(self.real_var.get()),
             package_zip=bool(self.zip_var.get()),
             custom_field_weights=custom_field_weights,
@@ -2324,7 +2328,7 @@ class App(tk.Tk):
                   options.font_style, options.cursive_group, options.specific_font,
                   options.merge_real, options.package_zip, self.cancel_event,
                   options.augmentation_profile, options.edge_clipping,
-                  options.semi_broken_params, options.custom_field_weights,
+                  options.stroke_damage_profile, options.custom_field_weights,
                   options.custom_split_fractions, options.workers),
             daemon=False)
         self.worker.start()
@@ -2337,7 +2341,7 @@ class App(tk.Tk):
              merge_real, package_zip, cancel_event,
              augmentation_profile=config.DEFAULT_DEGRADATION_PROFILE,
              edge_clipping=config.DEFAULT_EDGE_CLIPPING,
-             semi_broken_params=None,
+             stroke_damage_profile=None,
              custom_field_weights=None,
              custom_split_fractions=None,
              workers=None):
@@ -2354,7 +2358,7 @@ class App(tk.Tk):
                                archive_planned=package_zip,
                                augmentation_profile=augmentation_profile,
                                edge_clipping=edge_clipping,
-                               semi_broken_params=semi_broken_params,
+                               stroke_damage_profile=stroke_damage_profile,
                                custom_field_weights=custom_field_weights,
                                custom_split_fractions=custom_split_fractions,
                                workers=workers)
