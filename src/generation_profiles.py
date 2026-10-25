@@ -16,7 +16,7 @@ import math
 import random
 import warnings
 from collections.abc import Mapping
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from numbers import Integral, Real
 
 from src import studio_spec
@@ -26,6 +26,12 @@ PROFILE_SCHEMA_VERSION = 1
 # Shape version of AugmentationProfile metadata.  Kept separate from
 # PROFILE_SCHEMA_VERSION, which seeds writer styles and must never change.
 AUGMENTATION_SCHEMA_VERSION = 2
+STROKE_DAMAGE_SCHEMA_VERSION = 1
+# Length-aware safeguard for short labels (age, sex, single characters).
+SHORT_LABEL_CHARS = 3
+SHORT_LABEL_MAX_ERODE_PROBABILITY = 0.35
+# Attempts after this number progressively soften stochastic damage.
+DAMAGE_BACKOFF_AFTER_ATTEMPT = 8
 DEFAULT_WRITER_PROFILE_ID = "writer_style_v1"
 DEFAULT_AUGMENTATION_PROFILE_ID = "historical_scan_v1"
 
@@ -255,6 +261,163 @@ class AugmentationProfile:
             "augmentation_schema_version": AUGMENTATION_SCHEMA_VERSION,
             **asdict(self),
         }
+
+
+def _whole_range(name: str, value, *, minimum: int) -> tuple[int, int]:
+    _range(name, value, minimum=minimum)
+    if any(not isinstance(item, Integral) or isinstance(item, bool) for item in value):
+        raise ValueError(f"{name} values must be integers")
+    return int(value[0]), int(value[1])
+
+
+@dataclass(frozen=True)
+class StrokeDamageProfile:
+    """Localized stroke damage for semi-broken samples.
+
+    The defaults (:func:`stroke_damage_from_config`) reproduce the config
+    ``BROKEN_*`` behavior and RNG draws exactly.
+    """
+
+    contrast_probability: float
+    contrast_range: tuple[float, float]
+    erode_probability: float
+    erode_blend_range: tuple[float, float]
+    gap_probability: float
+    gap_count_range: tuple[int, int]
+    gap_size_range: tuple[int, int]
+    scratch_probability: float
+    scratch_count_range: tuple[int, int]
+
+    def __post_init__(self) -> None:
+        for name in ("contrast_probability", "erode_probability",
+                     "gap_probability", "scratch_probability"):
+            _probability(name, getattr(self, name))
+        low, _high = _range("contrast_range", self.contrast_range,
+                            minimum=0, maximum=1)
+        if low <= 0:
+            raise ValueError("contrast_range values must be greater than 0")
+        _range("erode_blend_range", self.erode_blend_range, minimum=0, maximum=1)
+        _whole_range("gap_count_range", self.gap_count_range, minimum=1)
+        _whole_range("gap_size_range", self.gap_size_range, minimum=1)
+        _whole_range("scratch_count_range", self.scratch_count_range, minimum=1)
+
+    @property
+    def profile_id(self) -> str:
+        return content_id("stroke", _stroke_values(asdict(self)))
+
+    def to_metadata(self) -> dict[str, object]:
+        return {
+            "stroke_damage_schema_version": STROKE_DAMAGE_SCHEMA_VERSION,
+            "profile_id": self.profile_id,
+            **asdict(self),
+        }
+
+    @classmethod
+    def from_legacy_params(cls, params: Mapping | None) -> "StrokeDamageProfile":
+        """Convert the old GUI dict (contrast_prob, gap_count, and so on).
+
+        ``gap_count: N`` becomes ``gap_count_range = (1, max(1, int(N)))``;
+        missing keys fall back to the config defaults, as the old
+        ``_semi_broken`` did.
+        """
+        base = stroke_damage_from_config()
+        params = dict(params or {})
+        unknown = sorted(set(params) - _LEGACY_STROKE_KEYS)
+        if unknown:
+            raise ValueError(f"Unknown stroke damage params: {', '.join(unknown)}")
+        changes: dict[str, object] = {}
+        for legacy, field in (("contrast_prob", "contrast_probability"),
+                              ("erode_prob", "erode_probability"),
+                              ("gap_prob", "gap_probability"),
+                              ("scratch_prob", "scratch_probability")):
+            if legacy in params:
+                changes[field] = float(params[legacy])
+        if params.get("gap_count") is not None:
+            changes["gap_count_range"] = (1, max(1, int(params["gap_count"])))
+        return replace(base, **changes)
+
+    def constrained_for_label(self, label: str, attempt: int) -> "StrokeDamageProfile":
+        """Apply the short-label safeguard and the late-attempt backoff.
+
+        Labels of 3 or fewer characters cap both ends of the gap-count range
+        at 3 x length and the erode chance at 0.35.  Attempts above 8 scale
+        the gap chance, erode chance, and gap-count range by
+        ``max(0.1, 1 - 0.1 * (attempt - 8))``, keeping at least one gap.
+        """
+        profile = self
+        length = len(label.strip())
+        if length <= SHORT_LABEL_CHARS:
+            cap = max(1, length * 3)
+            low, high = profile.gap_count_range
+            profile = replace(
+                profile,
+                gap_count_range=(min(low, cap), min(high, cap)),
+                erode_probability=min(profile.erode_probability,
+                                      SHORT_LABEL_MAX_ERODE_PROBABILITY),
+            )
+        if attempt > DAMAGE_BACKOFF_AFTER_ATTEMPT:
+            scale = max(0.1, 1.0 - ((attempt - DAMAGE_BACKOFF_AFTER_ATTEMPT) * 0.1))
+            low, high = profile.gap_count_range
+            profile = replace(
+                profile,
+                gap_probability=profile.gap_probability * scale,
+                erode_probability=profile.erode_probability * scale,
+                gap_count_range=(max(1, int(low * scale)), max(1, int(high * scale))),
+            )
+        return profile
+
+
+_LEGACY_STROKE_KEYS = frozenset({
+    "contrast_prob", "erode_prob", "gap_prob", "gap_count", "scratch_prob",
+})
+_STROKE_INTEGER_FIELDS = frozenset({
+    "gap_count_range", "gap_size_range", "scratch_count_range",
+})
+
+
+def _stroke_values(fields: Mapping[str, object]) -> dict[str, object]:
+    return {
+        name: _normalized_number(value, name in _STROKE_INTEGER_FIELDS)
+        for name, value in fields.items()
+    }
+
+
+def stroke_damage_from_config() -> StrokeDamageProfile:
+    """The config ``BROKEN_*`` values, read at call time."""
+    import config
+
+    return StrokeDamageProfile(
+        contrast_probability=config.BROKEN_CONTRAST_PROB,
+        contrast_range=tuple(config.BROKEN_CONTRAST_RANGE),
+        erode_probability=config.BROKEN_ERODE_PROB,
+        erode_blend_range=tuple(config.BROKEN_ERODE_BLEND),
+        gap_probability=config.BROKEN_INK_GAP_PROB,
+        gap_count_range=tuple(config.BROKEN_INK_GAP_COUNT),
+        gap_size_range=tuple(config.BROKEN_INK_GAP_SIZE),
+        scratch_probability=config.BROKEN_SCRATCH_PROB,
+        scratch_count_range=tuple(config.BROKEN_SCRATCH_COUNT),
+    )
+
+
+def as_stroke_damage_profile(value) -> StrokeDamageProfile:
+    """Accept a profile, a legacy params dict, or None (config defaults)."""
+    if isinstance(value, StrokeDamageProfile):
+        return value
+    if value is None:
+        return stroke_damage_from_config()
+    if isinstance(value, Mapping):
+        return StrokeDamageProfile.from_legacy_params(value)
+    raise TypeError(f"Unsupported stroke damage settings: {value!r}")
+
+
+def stroke_damage_from_spec(spec: Mapping) -> StrokeDamageProfile:
+    """Build a profile from a studio ``stroke_damage`` section."""
+    data = studio_spec.require_valid_section("stroke_damage", spec)
+    return StrokeDamageProfile(**studio_spec.section_fields("stroke_damage", data))
+
+
+def stroke_damage_spec_from_profile(profile: StrokeDamageProfile) -> dict:
+    return studio_spec.section_from_fields("stroke_damage", asdict(profile))
 
 
 WRITER_STYLE_PROFILES: dict[str, WriterStyleProfile] = {
