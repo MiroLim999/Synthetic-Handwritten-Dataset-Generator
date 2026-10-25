@@ -17,7 +17,7 @@ from tkinter import filedialog, messagebox, simpledialog, ttk
 from PIL import Image, ImageTk
 
 import config
-from gui_widgets import RangeSlider, model_for_spec
+from gui_widgets import RangeSlider, Tooltip, model_for_spec
 from src import studio_spec
 from src.generation_profiles import (AUGMENTATION_PROFILES, CUTOFF_PROFILES,
                                      cutoff_spec_from_profile)
@@ -148,6 +148,7 @@ class StudioPanel(ttk.Frame):
                         "section": section_style}
         self._background = background
         self.sliders: dict[str, RangeSlider] = {}
+        self.tooltips: dict[str, tuple[Tooltip, Tooltip]] = {}
         self._controls: list[tk.Widget] = []
         self._stroke_enabled = True
         self._build()
@@ -265,11 +266,16 @@ class StudioPanel(ttk.Frame):
         label = spec.label
         if spec.kind == "chance":
             label = "Chance"
-        ttk.Label(row, text=f"  {label}", style=self._styles["hint"], width=30).pack(side="left")
+        label_widget = ttk.Label(row, text=f"  {label}", style=self._styles["hint"],
+                                 width=30)
+        label_widget.pack(side="left")
         slider = RangeSlider(row, model_for_spec(spec, self._state.value(spec)),
                              command=lambda value, spec=spec: self._on_slider(spec, value),
                              background=self._background)
         slider.pack(side="left", fill="x", expand=True)
+        help_text = f"{spec.tooltip} (double-click or Enter to type a value)"
+        self.tooltips[spec.path] = (Tooltip(label_widget, help_text),
+                                    Tooltip(slider, help_text))
         self.sliders[spec.path] = slider
         self._controls.append(slider)
 

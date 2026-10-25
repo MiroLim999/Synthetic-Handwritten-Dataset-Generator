@@ -327,6 +327,61 @@ class RangeSlider(tk.Canvas):
         return "break"
 
 
+class Tooltip:
+    """Hover (or keyboard-focus) help text for a widget."""
+
+    DELAY_MS = 500
+
+    def __init__(self, widget, text: str):
+        self.widget = widget
+        self.text = text
+        self._after = None
+        self._window = None
+        widget.bind("<Enter>", self._schedule, add="+")
+        widget.bind("<Leave>", self.hide, add="+")
+        widget.bind("<ButtonPress>", self.hide, add="+")
+        widget.bind("<FocusIn>", self._schedule, add="+")
+        widget.bind("<FocusOut>", self.hide, add="+")
+        widget.bind("<Destroy>", self.hide, add="+")
+
+    def _schedule(self, _event=None) -> None:
+        self._cancel()
+        self._after = self.widget.after(self.DELAY_MS, self.show)
+
+    def _cancel(self) -> None:
+        if self._after is not None:
+            try:
+                self.widget.after_cancel(self._after)
+            except tk.TclError:
+                pass
+            self._after = None
+
+    def show(self) -> None:
+        self._after = None
+        if self._window is not None or not self.text:
+            return
+        try:
+            x = self.widget.winfo_rootx() + 12
+            y = self.widget.winfo_rooty() + self.widget.winfo_height() + 4
+        except tk.TclError:
+            return
+        self._window = window = tk.Toplevel(self.widget)
+        window.wm_overrideredirect(True)
+        window.wm_geometry(f"+{x}+{y}")
+        tk.Label(window, text=self.text, justify="left", wraplength=320,
+                 background="#1f2430", foreground="#ffffff", padx=8, pady=4,
+                 font=("Segoe UI", 9)).pack()
+
+    def hide(self, _event=None) -> None:
+        self._cancel()
+        if self._window is not None:
+            try:
+                self._window.destroy()
+            except tk.TclError:
+                pass
+            self._window = None
+
+
 def model_for_spec(spec, value) -> RangeModel:
     """A model matching a :class:`src.studio_spec.ParamSpec`."""
     scale = 100.0 if spec.unit == "%" else 1.0
