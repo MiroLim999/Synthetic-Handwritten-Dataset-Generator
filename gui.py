@@ -8,6 +8,7 @@ Launch by double-clicking "Generate Images.bat", or run:
 import json
 import math
 import os
+import re
 import sys
 import time
 import queue
@@ -38,6 +39,7 @@ from src.generate_synthetic import (GenerationCancelled, field_weights_for_mode,
                                     zip_dataset)
 from src.generation_io import verify_sha256_sidecar
 from src.generation_resources import preflight_generation_resources
+from src.provenance import atomic_write_json
 from src.build_splits import build
 from src.render import (CURSIVE_STYLE_GROUPS, fonts_for_style,
                         font_display_name, font_path_for)
@@ -209,6 +211,55 @@ def parse_preset_values(data) -> tuple[dict[str, float], list[str]]:
         key for key in data if key not in SLIDER_SPECS and key not in PRESET_METADATA_KEYS
     )
     return values, ignored
+
+
+_PRESET_PATH_CHARACTERS = frozenset('/\\:*?"<>|')
+MAX_PRESET_NAME_LENGTH = 64
+
+
+def preset_slug(name: str) -> str:
+    """Turn a display name into a safe preset filename stem.
+
+    Letters are lowercased and runs of other characters become ``_``.  Names
+    with path characters, ``..``, control characters, Windows reserved device
+    names, or an empty/over-long result are rejected.
+    """
+    text = (name or "").strip()
+    if not text:
+        raise ValueError("Preset name cannot be blank.")
+    if (".." in text or any(ch in _PRESET_PATH_CHARACTERS for ch in text)
+            or any(ord(ch) < 32 for ch in text)):
+        raise ValueError(
+            "Preset names cannot contain path characters such as / \\ : or '..'.")
+    slug = re.sub(r"[^a-z0-9_-]+", "_", text.lower())
+    slug = re.sub(r"_+", "_", slug).strip("_-")
+    if not slug:
+        raise ValueError("Preset name must contain at least one letter or digit.")
+    if len(slug) > MAX_PRESET_NAME_LENGTH:
+        raise ValueError(
+            f"Preset name is too long (maximum {MAX_PRESET_NAME_LENGTH} characters).")
+    if slug.upper() in config._WINDOWS_RESERVED_NAMES:
+        raise ValueError(f"Preset name uses a reserved Windows device name: {slug!r}")
+    return slug
+
+
+def preset_path_for(slug: str, preset_dir: Path | None = None) -> Path:
+    """Return the preset file for ``slug``, refusing anything outside the folder."""
+    preset_dir = PRESET_DIR if preset_dir is None else Path(preset_dir)
+    path = preset_dir / f"{slug}.json"
+    if path.resolve(strict=False).parent != preset_dir.resolve(strict=False):
+        raise ValueError(f"Preset path escapes the preset folder: {path}")
+    return path
+
+
+def preset_payload(display_name: str, slider_values: dict[str, float]) -> dict:
+    """Preset JSON with every slider value snapped to its step."""
+    data: dict[str, object] = {"name": display_name}
+    for key, raw in slider_values.items():
+        spec = SLIDER_SPECS[key]
+        value = snap_value(raw, spec.step, spec.low, spec.high)
+        data[key] = int(value) if spec.step >= 1 and float(spec.step).is_integer() else value
+    return data
 
 
 def mode_field_weights(sample_mode: str) -> dict[str, int]:
@@ -1598,24 +1649,31 @@ class App(tk.Tk):
 
     def _save_current_preset(self):
         name = simpledialog.askstring("Save Preset", "Enter a name for this Developer Studio preset:")
-        if not name or not name.strip():
+        if name is None:
             return
-        safe_name = name.strip().replace(" ", "_").lower()
-        PRESET_DIR.mkdir(parents=True, exist_ok=True)
-        preset_file = PRESET_DIR / f"{safe_name}.json"
-
-        data = {"name": name.strip()}
-        for k, var in self.dev_sliders.items():
-            data[k] = var.get()
-
         try:
-            with open(preset_file, "w", encoding="utf-8") as f:
-                json.dump(data, f, indent=2)
-            self._refresh_preset_list()
-            self.preset_var.set(safe_name)
-            self.status.config(text=f"Saved preset: {safe_name}", foreground=SUCCESS)
-        except Exception as exc:
+            safe_name = preset_slug(name)
+            preset_file = preset_path_for(safe_name)
+        except ValueError as exc:
+            messagebox.showerror("Invalid preset name", str(exc))
+            return
+        if preset_file.exists() and not messagebox.askyesno(
+                "Overwrite preset",
+                f"A preset named '{safe_name}' already exists. Replace it?",
+                icon="warning"):
+            return
+
+        data = preset_payload(
+            name.strip(), {k: var.get() for k, var in self.dev_sliders.items()})
+        try:
+            PRESET_DIR.mkdir(parents=True, exist_ok=True)
+            atomic_write_json(preset_file, data)
+        except OSError as exc:
             messagebox.showerror("Error saving preset", str(exc))
+            return
+        self._refresh_preset_list()
+        self.preset_var.set(safe_name)
+        self.status.config(text=f"Saved preset: {safe_name}", foreground=SUCCESS)
 
     def _get_selected_dataset_folder(self):
         selected = self.tree.selection()
