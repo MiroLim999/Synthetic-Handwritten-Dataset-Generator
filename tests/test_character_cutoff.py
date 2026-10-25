@@ -96,7 +96,11 @@ class CutoffEngineTests(unittest.TestCase):
         short = heavy.constrained_for_label(" 42 ")
         self.assertFalse(short.left.active or short.right.active)
         self.assertLessEqual(short.top.fraction_range[1], heavy.short_label_max_fraction)
-        self.assertEqual(heavy.constrained_for_label("Juan"), heavy)
+        long_label = heavy.constrained_for_label("Twenty-Fourth day of June, 1951")
+        self.assertEqual(long_label.top, heavy.top)
+        # Side cuts clip at most 35% of one average character.
+        self.assertLessEqual(long_label.left.fraction_range[1], 0.35 / 31)
+        self.assertEqual(heavy.constrained_for_label("Juan").left, heavy.left)
 
     def test_rotation_and_cut_stay_aligned(self):
         rotating = replace(AUGMENTATION_PROFILES["clean"], rotate_probability=1.0,
@@ -178,7 +182,8 @@ class CutoffSidecarTests(_DatasetCase):
         report = validate_dataset(out_dir, write_artifacts=False)
         self.assertTrue(report.valid, report.errors)
         self.assertEqual(report.statistics["cutoff"]["samples"], len(rows))
-        self.assertLessEqual(report.statistics["cutoff"]["max_ink_loss"], 0.20)
+        self.assertLessEqual(report.statistics["cutoff"]["max_ink_loss"],
+                             CUTOFF_PROFILES["heavy"].max_ink_loss)
 
         none_dir = self._generate("none", edge_clipping="none")
         self.assertFalse((none_dir / CUTOFF_ANNOTATIONS_FILENAME).exists())

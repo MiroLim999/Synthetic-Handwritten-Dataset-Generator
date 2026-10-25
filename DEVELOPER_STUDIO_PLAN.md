@@ -407,9 +407,15 @@ Affected files: `src/generation_profiles.py`, `config.py`
   | Profile | Top / bottom (each) | Left / right (each) | Max ink loss |
   |---|---|---|---|
   | `none` | 0 | 0 | - |
-  | `light` | 50% chance, 0.03-0.08 | 0 | 0.10 |
-  | `moderate` | 60%, 0.06-0.14 | 15%, 0.02-0.05 | 0.15 |
-  | `heavy` | 75%, 0.10-0.22 | 30%, 0.03-0.08 | 0.20 |
+  | `light` | 50% chance, 0.03-0.07 | 0 | 0.08 |
+  | `moderate` | 55%, 0.05-0.11 | 15%, 0.01-0.04 | 0.12 |
+  | `heavy` | 65%, 0.08-0.16 | 30%, 0.02-0.06 | 0.18 |
+
+  Tuned in S3.9 (starting values were light 50%/0.03-0.08/0.10, moderate
+  60%/0.06-0.14 + 15%/0.02-0.05/0.15, heavy 75%/0.10-0.22 + 30%/0.03-0.08/0.20).
+  Left/right cuts are also capped per label at `side_max_char_fraction`
+  (0.35) of one average character width, so they clip a letter rather than
+  removing it.
 
 - [ ] `constrained_for_label(label)`: labels of 3 or fewer characters get no
       left/right cuts, and their vertical cuts are capped at

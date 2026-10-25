@@ -851,6 +851,10 @@ class CutoffProfile:
     max_ink_loss: float = 0.0
     short_label_chars: int = 3
     short_label_max_fraction: float = 0.10
+    # Left/right cuts are capped at this share of one average character
+    # (ink width / label length), so they clip a letter instead of removing
+    # it and the label still matches the image.
+    side_max_char_fraction: float = 0.35
     method: str = CUTOFF_METHOD
 
     def __post_init__(self) -> None:
@@ -869,6 +873,9 @@ class CutoffProfile:
         cap = _finite("short_label_max_fraction", self.short_label_max_fraction)
         if not 0 <= cap < 1:
             raise ValueError("short_label_max_fraction must be in [0, 1)")
+        side_cap = _finite("side_max_char_fraction", self.side_max_char_fraction)
+        if not 0 <= side_cap <= 1:
+            raise ValueError("side_max_char_fraction must be between 0 and 1")
         if self.method != CUTOFF_METHOD:
             raise ValueError(f"Unsupported cutoff method {self.method!r}")
 
@@ -881,17 +888,28 @@ class CutoffProfile:
         return any(side.active for _name, side in self.sides())
 
     def constrained_for_label(self, label: str) -> "CutoffProfile":
-        """Short labels get no side cuts and capped vertical cuts."""
-        if len(label.strip()) > self.short_label_chars:
-            return self
-        cap = self.short_label_max_fraction
+        """Adapt the cut to one label.
 
-        def capped(side: CutoffSide) -> CutoffSide:
+        Short labels get no side cuts and capped vertical cuts.  Longer
+        labels keep their vertical cuts, and side cuts are capped at
+        ``side_max_char_fraction`` of one average character width.
+        """
+        length = len(label.strip())
+
+        def capped(side: CutoffSide, cap: float) -> CutoffSide:
             low, high = side.fraction_range
+            if high <= cap:
+                return side
             return replace(side, fraction_range=(min(low, cap), min(high, cap)))
 
-        return replace(self, top=capped(self.top), bottom=capped(self.bottom),
-                       left=CutoffSide(), right=CutoffSide())
+        if length <= self.short_label_chars:
+            cap = self.short_label_max_fraction
+            return replace(self, top=capped(self.top, cap),
+                           bottom=capped(self.bottom, cap),
+                           left=CutoffSide(), right=CutoffSide())
+        side_cap = self.side_max_char_fraction / length
+        return replace(self, left=capped(self.left, side_cap),
+                       right=capped(self.right, side_cap))
 
     def to_metadata(self) -> dict[str, object]:
         return {
@@ -906,27 +924,28 @@ def _cutoff_side(probability: float, low: float, high: float) -> CutoffSide:
 
 CUTOFF_PROFILES: dict[str, CutoffProfile] = {
     "none": CutoffProfile(profile_id="none"),
+    # Tuned in S3.9 with tools.cutoff_stats and the review montage.
     "light": CutoffProfile(
         profile_id="light",
-        top=_cutoff_side(0.50, 0.03, 0.08),
-        bottom=_cutoff_side(0.50, 0.03, 0.08),
-        max_ink_loss=0.10,
+        top=_cutoff_side(0.50, 0.03, 0.07),
+        bottom=_cutoff_side(0.50, 0.03, 0.07),
+        max_ink_loss=0.08,
     ),
     "moderate": CutoffProfile(
         profile_id="moderate",
-        top=_cutoff_side(0.60, 0.06, 0.14),
-        bottom=_cutoff_side(0.60, 0.06, 0.14),
-        left=_cutoff_side(0.15, 0.02, 0.05),
-        right=_cutoff_side(0.15, 0.02, 0.05),
-        max_ink_loss=0.15,
+        top=_cutoff_side(0.55, 0.05, 0.11),
+        bottom=_cutoff_side(0.55, 0.05, 0.11),
+        left=_cutoff_side(0.15, 0.01, 0.04),
+        right=_cutoff_side(0.15, 0.01, 0.04),
+        max_ink_loss=0.12,
     ),
     "heavy": CutoffProfile(
         profile_id="heavy",
-        top=_cutoff_side(0.75, 0.10, 0.22),
-        bottom=_cutoff_side(0.75, 0.10, 0.22),
-        left=_cutoff_side(0.30, 0.03, 0.08),
-        right=_cutoff_side(0.30, 0.03, 0.08),
-        max_ink_loss=0.20,
+        top=_cutoff_side(0.65, 0.08, 0.16),
+        bottom=_cutoff_side(0.65, 0.08, 0.16),
+        left=_cutoff_side(0.30, 0.02, 0.06),
+        right=_cutoff_side(0.30, 0.02, 0.06),
+        max_ink_loss=0.18,
     ),
 }
 
@@ -942,6 +961,7 @@ def _cutoff_values(profile: CutoffProfile) -> dict[str, object]:
         "max_ink_loss": float(profile.max_ink_loss),
         "short_label_chars": int(profile.short_label_chars),
         "short_label_max_fraction": float(profile.short_label_max_fraction),
+        "side_max_char_fraction": float(profile.side_max_char_fraction),
         "method": profile.method,
     })
     return values
