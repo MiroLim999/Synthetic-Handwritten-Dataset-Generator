@@ -178,6 +178,39 @@ if sys.stderr is None:
     sys.stderr = open(LOG_FILE, "a", encoding="utf-8")
 
 
+PRESET_METADATA_KEYS = frozenset({"name", "description"})
+
+
+def parse_preset_values(data) -> tuple[dict[str, float], list[str]]:
+    """Validate a flat studio preset before anything is applied.
+
+    Returns the slider values (clamped and snapped to each slider) and the
+    sorted unknown keys.  Any non-numeric or non-finite slider value raises
+    ``ValueError`` so a malformed preset is never half-applied.
+    """
+    if not isinstance(data, dict):
+        raise ValueError("Preset file must contain a JSON object.")
+    values: dict[str, float] = {}
+    problems = []
+    for key, raw in data.items():
+        spec = SLIDER_SPECS.get(key)
+        if spec is None:
+            continue
+        if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+            problems.append(f"{key} must be a number (got {raw!r})")
+            continue
+        if not math.isfinite(float(raw)):
+            problems.append(f"{key} must be finite (got {raw!r})")
+            continue
+        values[key] = snap_value(raw, spec.step, spec.low, spec.high)
+    if problems:
+        raise ValueError("Invalid preset values: " + "; ".join(problems))
+    ignored = sorted(
+        key for key in data if key not in SLIDER_SPECS and key not in PRESET_METADATA_KEYS
+    )
+    return values, ignored
+
+
 def mode_field_weights(sample_mode: str) -> dict[str, int]:
     """Weights for every supported field type, 0 for types the mode skips."""
     weights = field_weights_for_mode(sample_mode)
@@ -1532,18 +1565,36 @@ class App(tk.Tk):
         try:
             with open(preset_file, "r", encoding="utf-8") as f:
                 data = json.load(f)
-            self._slider_updating = True
-            for k, var in self.dev_sliders.items():
-                if k in data:
-                    val = float(data[k])
-                    var.set(val)
-                    self.dev_labels[k].set(self._slider_text(k, val))
-            self._slider_updating = False
-            self.degradation_var.set(config.DEGRADATION_PROFILES["custom_dev_v1"])
-            self._update_preview()
-            self.status.config(text=f"Loaded preset: {name}", foreground=SUCCESS)
-        except Exception as exc:
+            values, ignored = parse_preset_values(data)
+        except (OSError, ValueError) as exc:
             messagebox.showerror("Error loading preset", str(exc))
+            return
+        self._apply_preset_values(name, values, ignored)
+
+    def _apply_preset_values(self, name, values, ignored):
+        """Apply validated preset values all at once."""
+        self._slider_updating = True
+        try:
+            for key, value in values.items():
+                self.dev_sliders[key].set(value)
+                self.dev_labels[key].set(self._slider_text(key, value))
+            cropped = any(
+                self.dev_sliders[spec.name].get() > 0 for spec in CROP_SLIDER_SPECS
+            )
+            self.edge_clipping_var.set(
+                config.EDGE_CLIPPING_OPTIONS["custom" if cropped else "none"])
+            self.degradation_var.set(config.DEGRADATION_PROFILES["custom_dev_v1"])
+        finally:
+            self._slider_updating = False
+        self._update_preview()
+        if len(values) == len(SLIDER_SPECS):
+            applied = f"all {len(values)} studio values"
+        else:
+            applied = ", ".join(sorted(values)) or "no studio values"
+        message = f"Loaded preset {name}: applied {applied}"
+        if ignored:
+            message += f"; ignored {', '.join(ignored)}"
+        self.status.config(text=message + ".", foreground=SUCCESS)
 
     def _save_current_preset(self):
         name = simpledialog.askstring("Save Preset", "Enter a name for this Developer Studio preset:")
