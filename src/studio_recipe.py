@@ -19,6 +19,7 @@ import math
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
+from typing import Any
 from numbers import Real
 from pathlib import Path
 
@@ -214,7 +215,10 @@ def parse_recipe(data, *, origin: str = "recipe") -> StudioRecipe:
     return StudioRecipe(
         name=str(data.get("name", "")),
         description=str(data.get("description", "")),
-        **{name: sections.get(name) for name in SECTIONS},
+        augmentation=sections.get("augmentation"),
+        stroke_damage=sections.get("stroke_damage"),
+        cutoff=sections.get("cutoff"),
+        run=sections.get("run"),
     )
 
 
@@ -493,7 +497,7 @@ def _entry(path: Path, builtin: bool) -> PresetEntry:
 def list_presets(builtin_dir=None, user_dir=None) -> list[PresetEntry]:
     """Built-in presets, then user presets, each sorted by slug."""
     builtin, user = _dirs(builtin_dir, user_dir)
-    entries = []
+    entries: list[PresetEntry] = []
     for folder, is_builtin in ((builtin, True), (user, False)):
         if folder.is_dir():
             entries.extend(_entry(path, is_builtin)
@@ -604,7 +608,13 @@ class StudioState:
         """A new state with one section replaced (validated, defaults filled)."""
         normalized = studio_spec.require_valid_section(section, data)
         normalized.pop("based_on", None)
-        return replace(self, **{section: normalized})
+        return self._replace_section(section, normalized)
+
+    def _replace_section(self, section: str, data: dict) -> "StudioState":
+        if section not in EFFECT_SECTIONS:
+            raise ValueError(f"Unknown studio section {section!r}")
+        changes: dict[str, Any] = {section: data}
+        return replace(self, **changes)
 
     def with_value(self, spec: studio_spec.ParamSpec, value) -> "StudioState":
         section = copy.deepcopy(getattr(self, spec.section))
@@ -679,7 +689,7 @@ class StudioState:
                      else (effect,))
             for name in names:
                 data[name]["probability"] = 0.0
-            state = replace(state, **{section: data})
+            state = state._replace_section(section, data)
         return state
 
     def augmentation_profile(self):

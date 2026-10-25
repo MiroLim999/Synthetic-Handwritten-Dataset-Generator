@@ -353,6 +353,7 @@ def section_from_fields(section: str, values: Mapping[str, object]) -> dict:
     """Build a complete section from profile field values (no validation)."""
     data: dict = {}
     for spec in params_for_section(section):
+        value: object
         if spec.kind == "range" and len(spec.fields) == 2:
             value = (values[spec.fields[0]], values[spec.fields[1]])
         else:

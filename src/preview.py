@@ -12,18 +12,21 @@ import random
 from collections import Counter
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from pathlib import Path
 
 import numpy as np
 from PIL import Image
 
 import config
-from src.generate_synthetic import (_preflight_generation, effective_fonts_for,
-                                    resolve_run)
+from src.generate_synthetic import (ResolvedRun, _preflight_generation,
+                                    effective_fonts_for, resolve_run)
 from src.generation_io import SyntheticWriterAssigner
-from src.generation_profiles import CUTOFF_SIDE_NAMES, writer_style_for
+from src.generation_profiles import (CUTOFF_SIDE_NAMES, StrokeDamageProfile,
+                                     writer_style_for)
 from src.sample_pipeline import (PlannedSample, SampleAttempt,
                                  generate_valid_sample, iter_run_plan)
-from src.split_policy import build_synthetic_evaluation_policy
+from src.split_policy import (SyntheticEvaluationPolicy,
+                              build_synthetic_evaluation_policy)
 from src.studio_recipe import StudioRecipe
 
 
@@ -48,11 +51,11 @@ class PreviewTile:
 class _RunContext:
     count: int
     seed: int
-    resolved: object
-    names_dir: object
-    evaluation_policy: object
+    resolved: ResolvedRun
+    names_dir: Path
+    evaluation_policy: SyntheticEvaluationPolicy
     writer_assigner: SyntheticWriterAssigner
-    stroke_damage: object
+    stroke_damage: StrokeDamageProfile | None
 
 
 def _context(options: Mapping, recipe: StudioRecipe | None, count: int,

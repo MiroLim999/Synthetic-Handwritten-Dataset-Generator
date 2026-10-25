@@ -67,7 +67,8 @@ def ink_mask(image: Image.Image) -> Image.Image:
 
 def rotate_mask(mask: Image.Image, angle: float) -> Image.Image:
     """Rotate a mask exactly like the image (same angle, ``expand=True``)."""
-    return mask.rotate(angle, expand=True, fillcolor=0, resample=Image.NEAREST)
+    return mask.rotate(angle, expand=True, fillcolor=0,
+                       resample=Image.Resampling.NEAREST)
 
 
 def draw_fractions(profile: CutoffProfile, rng) -> dict[str, float]:

@@ -11,6 +11,7 @@ from __future__ import annotations
 import random
 from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass
+from numbers import Real
 from pathlib import Path
 
 import numpy as np
@@ -53,7 +54,7 @@ def item_seed_for(seed: int, index: int) -> int:
     return (seed + index * 1_000_003) & 0x7FFFFFFF
 
 
-def iter_run_plan(count: int, seed: int, field_weights: Mapping[str, float],
+def iter_run_plan(count: int, seed: int, field_weights: Mapping[str, Real],
                   split_fractions, writer_assigner: SyntheticWriterAssigner,
                   ) -> Iterator[PlannedSample]:
     """The exact sample plan a run with these settings follows."""
