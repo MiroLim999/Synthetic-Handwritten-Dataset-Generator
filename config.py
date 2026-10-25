@@ -70,7 +70,6 @@ DEGRADATION_PROFILES = {
     "scan_noise": "Scan noise & scanner lines",
     "heavy_smudge": "Heavy smudge & ink damage",
     "clean": "Clean (minimal degradation)",
-    "custom_dev_v1": "Custom Developer Studio",
 }
 DEFAULT_DEGRADATION_PROFILE = "historical_scan_v1"
 
