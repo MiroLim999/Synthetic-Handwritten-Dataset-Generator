@@ -1121,8 +1121,19 @@ class App(tk.Tk):
     def _on_studio_changed(self, _event=None):
         self.studio_state = self.studio_panel.get_state()
         self._update_recipe_summary()
-        self._update_preview()
+        self._schedule_generate_preview()
         self._schedule_studio_preview(restart=True)
+
+    def _schedule_generate_preview(self):
+        """Debounce the Generate tab's live preview so dragging stays smooth."""
+        pending = self.__dict__.get("_generate_preview_after")
+        if pending is not None:
+            self.after_cancel(pending)
+
+        def run():
+            self._generate_preview_after = None
+            self._update_preview()
+        self._generate_preview_after = self.after(PREVIEW_DEBOUNCE_MS, run)
 
     # ------------------------------------------------------------------
     # Studio preview (background rendering)
