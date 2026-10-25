@@ -6,6 +6,7 @@ Launch by double-clicking "Generate Images.bat", or run:
 """
 
 import json
+import math
 import os
 import sys
 import time
@@ -109,6 +110,35 @@ SLIDER_SPECS = {
 }
 STROKE_DAMAGE_SLIDERS = tuple(spec.name for spec in STROKE_SLIDER_SPECS)
 SLIDER_LABEL_WIDTH = 20
+
+
+def _step_decimals(step: float) -> int:
+    """Number of decimal places a step needs (0.01 -> 2, 0.5 -> 1, 1 -> 0)."""
+    text = f"{step:.10f}".rstrip("0").rstrip(".")
+    return len(text.partition(".")[2])
+
+
+def snap_value(value, step: float, low: float, high: float) -> float:
+    """Clamp ``value`` to [low, high] and round it to the nearest ``step``."""
+    value = float(value)
+    step = float(step)
+    if not math.isfinite(value):
+        raise ValueError(f"value must be finite; got {value!r}")
+    if not math.isfinite(step) or step <= 0:
+        raise ValueError(f"step must be a positive finite number; got {step!r}")
+    if low > high:
+        raise ValueError(f"low ({low}) must not exceed high ({high})")
+    clamped = min(high, max(low, value))
+    snapped = round(round(clamped / step) * step, _step_decimals(step))
+    return float(min(high, max(low, snapped)))
+
+
+def format_value(value, step: float, unit: str = "") -> str:
+    """Format ``value`` with exactly the precision its step implies."""
+    text = f"{float(value):.{_step_decimals(step)}f}"
+    if text.startswith("-") and float(text) == 0:
+        text = text[1:]
+    return f"{text}{unit}"
 
 
 def _rotate_log(log_path: Path | None = None) -> None:
@@ -813,7 +843,10 @@ class App(tk.Tk):
             def _on_move(val):
                 if getattr(self, "_slider_updating", False):
                     return
-                lbl_var.set(self._slider_text(spec.name, float(val)))
+                snapped = snap_value(val, spec.step, spec.low, spec.high)
+                if snapped != val_var.get():
+                    val_var.set(snapped)
+                lbl_var.set(self._slider_text(spec.name, snapped))
                 self._on_developer_slider_change(spec.name)
 
             scale = ttk.Scale(row, from_=spec.low, to=spec.high, variable=val_var,
@@ -1254,9 +1287,7 @@ class App(tk.Tk):
     @staticmethod
     def _slider_text(name: str, value: float) -> str:
         spec = SLIDER_SPECS[name]
-        if spec.step < 1.0:
-            return f"{value:.2f}{spec.unit}"
-        return f"{int(value)}{spec.unit}"
+        return format_value(value, spec.step, spec.unit)
 
     def _build_semi_broken_params(self):
         """Stroke damage params, or None outside semi-broken modes."""
@@ -1330,10 +1361,10 @@ class App(tk.Tk):
             for k, var in self.dev_sliders.items():
                 if k.startswith("crop_"):
                     continue
-                v = var.get()
-                unit = "°" if k == "rotate" else ("px" if k == "blur" else "")
-                res = 1.0 if k in ("noise", "scanline", "jpeg", "gap_count") or "crop" in k else 0.01
-                self.dev_labels[k].set(f"{v:.2f}{unit}" if res < 1.0 else f"{int(v)}{unit}")
+                spec = SLIDER_SPECS[k]
+                v = snap_value(var.get(), spec.step, spec.low, spec.high)
+                var.set(v)
+                self.dev_labels[k].set(self._slider_text(k, v))
             self._slider_updating = False
         self._update_preview()
 
@@ -1346,7 +1377,7 @@ class App(tk.Tk):
             self._slider_updating = True
             for side in ("crop_top", "crop_bottom", "crop_left", "crop_right"):
                 self.dev_sliders[side].set(avg_pct)
-                self.dev_labels[side].set(f"{int(avg_pct)}%")
+                self.dev_labels[side].set(self._slider_text(side, avg_pct))
             self._slider_updating = False
         self._update_preview()
 
@@ -1405,9 +1436,7 @@ class App(tk.Tk):
         for name, def_val in defaults.items():
             if hasattr(self, "dev_sliders") and name in self.dev_sliders:
                 self.dev_sliders[name].set(def_val)
-                unit = "°" if name == "rotate" else ("px" if name == "blur" else ("%" if "crop" in name else ""))
-                res = 1.0 if name in ("noise", "scanline", "jpeg", "gap_count") or "crop" in name else 0.01
-                self.dev_labels[name].set(f"{def_val:.2f}{unit}" if res < 1.0 else f"{int(def_val)}{unit}")
+                self.dev_labels[name].set(self._slider_text(name, def_val))
 
         self._slider_updating = False
         self._update_preview()
@@ -1508,9 +1537,7 @@ class App(tk.Tk):
                 if k in data:
                     val = float(data[k])
                     var.set(val)
-                    unit = "°" if k == "rotate" else ("px" if k == "blur" else ("%" if "crop" in k else ""))
-                    res = 1.0 if k in ("noise", "scanline", "jpeg", "gap_count") or "crop" in k else 0.01
-                    self.dev_labels[k].set(f"{val:.2f}{unit}" if res < 1.0 else f"{int(val)}{unit}")
+                    self.dev_labels[k].set(self._slider_text(k, val))
             self._slider_updating = False
             self.degradation_var.set(config.DEGRADATION_PROFILES["custom_dev_v1"])
             self._update_preview()
