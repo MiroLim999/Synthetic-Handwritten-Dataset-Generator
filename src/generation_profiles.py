@@ -18,6 +18,9 @@ from numbers import Integral, Real
 
 
 PROFILE_SCHEMA_VERSION = 1
+# Shape version of AugmentationProfile metadata.  Kept separate from
+# PROFILE_SCHEMA_VERSION, which seeds writer styles and must never change.
+AUGMENTATION_SCHEMA_VERSION = 2
 DEFAULT_WRITER_PROFILE_ID = "writer_style_v1"
 DEFAULT_AUGMENTATION_PROFILE_ID = "historical_scan_v1"
 
@@ -201,6 +204,11 @@ class AugmentationProfile:
     scanline_alpha_range: tuple[int, int]
     compression_probability: float
     jpeg_quality_range: tuple[int, int]
+    # Fields added in augmentation schema 2.  Their defaults reproduce the
+    # schema-1 behavior and RNG draws exactly.
+    rotate_min_degrees: float = 0.0
+    stain_count_range: tuple[int, int] = (2, 6)
+    stain_opacity_range: tuple[int, int] = (15, 45)
 
     def __post_init__(self) -> None:
         if not self.profile_id:
@@ -219,19 +227,29 @@ class AugmentationProfile:
         rotate = _finite("rotate_degrees", self.rotate_degrees)
         if rotate < 0:
             raise ValueError("rotate_degrees must be nonnegative")
+        rotate_min = _finite("rotate_min_degrees", self.rotate_min_degrees)
+        if not 0 <= rotate_min <= rotate:
+            raise ValueError(
+                "rotate_min_degrees must be between 0 and rotate_degrees")
         _range("blur_radius_range", self.blur_radius_range, minimum=0)
         _range("noise_std_range", self.noise_std_range, minimum=0)
         _range("paper_texture_std_range", self.paper_texture_std_range, minimum=0)
         for name, value, low, high in (
                 ("scanline_alpha_range", self.scanline_alpha_range, 0, 255),
-                ("jpeg_quality_range", self.jpeg_quality_range, 1, 100)):
+                ("jpeg_quality_range", self.jpeg_quality_range, 1, 100),
+                ("stain_count_range", self.stain_count_range, 0, 1000),
+                ("stain_opacity_range", self.stain_opacity_range, 0, 255)):
             _range(name, value, minimum=low, maximum=high)
             if any(not isinstance(item, Integral) or isinstance(item, bool)
                    for item in value):
                 raise ValueError(f"{name} values must be integers")
 
     def to_metadata(self) -> dict[str, object]:
-        return {"profile_schema_version": PROFILE_SCHEMA_VERSION, **asdict(self)}
+        return {
+            "profile_schema_version": PROFILE_SCHEMA_VERSION,
+            "augmentation_schema_version": AUGMENTATION_SCHEMA_VERSION,
+            **asdict(self),
+        }
 
 
 WRITER_STYLE_PROFILES: dict[str, WriterStyleProfile] = {

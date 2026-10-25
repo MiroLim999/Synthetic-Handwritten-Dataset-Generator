@@ -26,10 +26,18 @@ def _numpy_rng(np_rng):
     return np.random if np_rng is None else np_rng
 
 
-def _rotate(img: Image.Image, rng=None, degrees=None) -> Image.Image:
+def _rotate(img: Image.Image, rng=None, degrees=None,
+            min_degrees: float = 0.0) -> Image.Image:
     rng = _python_rng(rng)
     degrees = config.AUG_ROTATE_DEGREES if degrees is None else degrees
-    angle = rng.uniform(-degrees, degrees)
+    if min_degrees > 0:
+        # Draw a magnitude in [min, max], then a sign.
+        angle = rng.uniform(min_degrees, degrees)
+        if rng.random() < 0.5:
+            angle = -angle
+    else:
+        # The legacy single draw, kept so default output is byte-identical.
+        angle = rng.uniform(-degrees, degrees)
     return img.rotate(angle, expand=True, fillcolor="white", resample=Image.BICUBIC)
 
 
@@ -133,17 +141,18 @@ def _jpeg_roundtrip(img: Image.Image, rng=None,
         return encoded.convert("RGB").copy()
 
 
-def _stains(img: Image.Image, rng=None) -> Image.Image:
+def _stains(img: Image.Image, rng=None, count_range=(2, 6),
+            opacity_range=(15, 45)) -> Image.Image:
     """Add a few faint brownish blotches to mimic foxing / age spots."""
     rng = _python_rng(rng)
     img = img.convert("RGB")
     draw = ImageDraw.Draw(img, "RGBA")
     w, h = img.size
-    for _ in range(rng.randint(2, 6)):
+    for _ in range(rng.randint(*count_range)):
         cx, cy = rng.randint(0, w), rng.randint(0, h)
         r = rng.randint(3, max(4, h // 6))
         shade = rng.choice([(120, 90, 40), (150, 120, 70), (90, 70, 30)])
-        alpha = rng.randint(15, 45)
+        alpha = rng.randint(*opacity_range)
         draw.ellipse([cx - r, cy - r, cx + r, cy + r], fill=shade + (alpha,))
     return img
 
@@ -357,7 +366,11 @@ def degrade(img: Image.Image, damage_profile: str = "regular",
             ),
         )
     if rng.random() < stain_probability:
-        img = _stains(img, rng=rng)
+        if profile is None:
+            img = _stains(img, rng=rng)
+        else:
+            img = _stains(img, rng=rng, count_range=profile.stain_count_range,
+                          opacity_range=profile.stain_opacity_range)
     # Params only tune semi-broken damage; they never switch it on.
     if damage_profile.startswith("semi_broken"):
         img = _semi_broken(img, rng=rng, params=semi_broken_params)
@@ -367,6 +380,7 @@ def degrade(img: Image.Image, damage_profile: str = "regular",
             rng=rng,
             degrees=(config.AUG_ROTATE_DEGREES if profile is None
                      else profile.rotate_degrees),
+            min_degrees=0.0 if profile is None else profile.rotate_min_degrees,
         )
     if rng.random() < blur_probability:
         img = _blur(
