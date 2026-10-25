@@ -14,6 +14,8 @@ import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox, simpledialog, ttk
 
+from PIL import Image, ImageTk
+
 import config
 from gui_widgets import RangeSlider, model_for_spec
 from src import studio_spec
@@ -557,4 +559,146 @@ class StudioPanel(ttk.Frame):
 
     def controls(self) -> list[tk.Widget]:
         """Every interactive widget, for locking while a run is active."""
+        return list(self._controls)
+
+# ---------------------------------------------------------------------------
+# Preview grid
+# ---------------------------------------------------------------------------
+TILE_CHOICES = (6, 9, 12)
+TILE_COLUMNS = 3
+TILE_MAX_SIZE = (300, 120)
+SPLIT_CHOICES = ("All splits", "train", "val", "test")
+
+
+def tile_badges(tile) -> str:
+    """Caption under a preview tile: what it is and the file it will become."""
+    font = Path(tile.font).stem if tile.font else "?"
+    cut = "+".join(tile.cut_sides) if tile.cut_sides else "none"
+    return (f"{tile.field_type} | {font}\n"
+            f"cut: {cut} | kept on attempt {tile.attempts}\n{tile.path}")
+
+
+def fit_tile(image, max_size=TILE_MAX_SIZE):
+    """Show at true scale; only ever scale down to fit the tile."""
+    width, height = image.size
+    scale = min(1.0, max_size[0] / width, max_size[1] / height)
+    if scale >= 1.0:
+        return image
+    size = (max(1, int(width * scale)), max(1, int(height * scale)))
+    return image.resize(size, Image.Resampling.LANCZOS)
+
+
+class PreviewGrid(ttk.Frame):
+    """Tiles of the run's real first samples, rendered by the owner."""
+
+    def __init__(self, master, *, on_request=None, background: str = "#ffffff",
+                 card_style: str = "Card.TFrame", hint_style: str = "CardHint.TLabel",
+                 label_style: str = "CardLabel.TLabel"):
+        super().__init__(master, style=card_style, padding=12)
+        self.on_request = on_request
+        self._background = background
+        self._hint_style = hint_style
+        self._label_style = label_style
+        self._photos: list = []
+        self.offset = 0
+        self._controls: list[tk.Widget] = []
+        row = ttk.Frame(self, style=card_style)
+        row.pack(fill="x")
+        ttk.Label(row, text="Tiles", style=label_style).pack(side="left")
+        self.tiles_var = tk.StringVar(value=str(TILE_CHOICES[0]))
+        tiles_cb = ttk.Combobox(row, textvariable=self.tiles_var, state="readonly",
+                                width=4, values=[str(n) for n in TILE_CHOICES])
+        tiles_cb.pack(side="left", padx=(4, 10))
+        tiles_cb.bind("<<ComboboxSelected>>", lambda _event: self.restart())
+        ttk.Label(row, text="Split", style=label_style).pack(side="left")
+        self.split_var = tk.StringVar(value=SPLIT_CHOICES[0])
+        split_cb = ttk.Combobox(row, textvariable=self.split_var, state="readonly",
+                                width=10, values=list(SPLIT_CHOICES))
+        split_cb.pack(side="left", padx=(4, 10))
+        split_cb.bind("<<ComboboxSelected>>", lambda _event: self.restart())
+        self.previous_btn = ttk.Button(row, text="Previous", style="Quick.TButton",
+                                       command=self.previous_page)
+        self.previous_btn.pack(side="left", padx=(0, 4))
+        next_btn = ttk.Button(row, text="Next", style="Quick.TButton",
+                              command=self.next_page)
+        next_btn.pack(side="left", padx=(0, 4))
+        refresh_btn = ttk.Button(row, text="Refresh", style="Quick.TButton",
+                                 command=self.request)
+        refresh_btn.pack(side="left")
+        self._controls.extend([tiles_cb, split_cb, self.previous_btn, next_btn, refresh_btn])
+        self.note_label = ttk.Label(self, text="", style=hint_style, wraplength=620)
+        self.note_label.pack(anchor="w", pady=(6, 0))
+        self.retry_label = ttk.Label(self, text="", style=hint_style, wraplength=620)
+        self.retry_label.pack(anchor="w")
+        self.tiles_frame = tk.Frame(self, bg=background)
+        self.tiles_frame.pack(fill="x", pady=(6, 0))
+
+    @property
+    def tile_count(self) -> int:
+        return int(self.tiles_var.get())
+
+    @property
+    def split(self) -> str | None:
+        value = self.split_var.get()
+        return None if value == SPLIT_CHOICES[0] else value
+
+    def request(self) -> None:
+        if self.on_request is not None:
+            self.on_request()
+
+    def restart(self) -> None:
+        """Back to the first tiles (settings or filters changed)."""
+        self.offset = 0
+        self.request()
+
+    def next_page(self) -> None:
+        self.offset += self.tile_count
+        self.request()
+
+    def previous_page(self) -> None:
+        self.offset = max(0, self.offset - self.tile_count)
+        self.request()
+
+    def set_busy(self, text: str = "Rendering preview...") -> None:
+        self.note_label.config(text=text)
+
+    def set_retry_text(self, text: str) -> None:
+        self.retry_label.config(text=text)
+
+    def _clear(self) -> None:
+        for child in self.tiles_frame.winfo_children():
+            child.destroy()
+        self._photos = []
+
+    def show_tiles(self, tiles, note: str = "") -> None:
+        self._clear()
+        start = self.offset + 1
+        self.note_label.config(
+            text=f"Samples {start}-{self.offset + len(tiles)} of the planned run. {note}".strip()
+            if tiles else "No samples match this filter.")
+        for index, tile in enumerate(tiles):
+            cell = tk.Frame(self.tiles_frame, bg=self._background,
+                            highlightbackground="#e3e6ef", highlightthickness=1)
+            cell.grid(row=index // TILE_COLUMNS, column=index % TILE_COLUMNS,
+                      padx=4, pady=4, sticky="nsew")
+            if tile.error:
+                tk.Label(cell, text=f"Could not render {tile.path}:\n{tile.error}",
+                         fg="#dc2626", bg=self._background, wraplength=280,
+                         justify="left", font=("Segoe UI", 8)).pack(padx=6, pady=6)
+                continue
+            photo = ImageTk.PhotoImage(fit_tile(tile.image.convert("RGB")))
+            self._photos.append(photo)
+            tk.Label(cell, image=photo, bg=self._background).pack(padx=4, pady=(4, 2))
+            tk.Label(cell, text=tile_badges(tile), bg=self._background, fg="#7a8194",
+                     justify="left", font=("Segoe UI", 8)).pack(anchor="w", padx=4,
+                                                               pady=(0, 4))
+
+    def show_error(self, message: str) -> None:
+        self._clear()
+        self.note_label.config(text="")
+        tk.Label(self.tiles_frame, text=f"Preview failed: {message}", fg="#dc2626",
+                 bg=self._background, wraplength=600, justify="left",
+                 font=("Segoe UI", 9)).pack(anchor="w", padx=4, pady=6)
+
+    def controls(self) -> list[tk.Widget]:
         return list(self._controls)
