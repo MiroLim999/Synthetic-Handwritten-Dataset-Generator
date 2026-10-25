@@ -27,7 +27,9 @@ from PIL import Image, ImageDraw, ImageFont, ImageTk
 import random
 
 import config
-from gui_studio import STUDIO_CHANGED, PreviewGrid, StudioPanel
+from gui_studio import (COMPARE_SAMPLES, STUDIO_CHANGED, ComparePanel,
+                        PreviewGrid, StudioPanel, comparison_hints,
+                        real_scan_paths)
 from gui_widgets import format_value, snap_value  # noqa: F401  (re-exported)
 from src import fields
 from src.augment import degrade
@@ -38,6 +40,7 @@ from src.generate_synthetic import (GenerationCancelled, field_weights_for_mode,
                                     zip_dataset)
 from src.generation_io import verify_sha256_sidecar
 from src.generation_resources import preflight_generation_resources
+from src.image_statistics import compare_image_statistics
 from src.preview import preview_samples, retry_statistics
 from src.studio_recipe import StudioRecipe, StudioState
 from src.build_splits import build
@@ -530,6 +533,11 @@ class App(tk.Tk):
         self.preview_grid = PreviewGrid(outer, on_request=self._schedule_studio_preview,
                                         background=SURFACE)
         self.preview_grid.pack(fill="x")
+        self._section_label(preview_area, "Compare with real scans")
+        compare_outer = ttk.Frame(preview_area)
+        compare_outer.pack(fill="x", padx=16, pady=(0, 12))
+        self.compare_panel = ComparePanel(compare_outer, on_compare=self._start_compare)
+        self.compare_panel.pack(fill="x")
         self.studio_panel = StudioPanel(
             inner, state=self.studio_state, background=SURFACE,
             preset_dir=PRESET_DIR, on_recipe_loaded=self._apply_loaded_recipe,
@@ -539,6 +547,7 @@ class App(tk.Tk):
         self.studio_panel.bind(STUDIO_CHANGED, self._on_studio_changed)
         self._run_controls.extend(self.studio_panel.controls())
         self._run_controls.extend(self.preview_grid.controls())
+        self._run_controls.extend(self.compare_panel.controls())
         self._sync_stroke_damage_state()
 
     # ------------------------------------------------------------------
@@ -930,6 +939,9 @@ class App(tk.Tk):
     def _on_tab_change(self, _event=None):
         if self._selected_tab() is self.tab_datasets:
             self._refresh_datasets()
+        elif (self._selected_tab() is self.__dict__.get("tab_studio")
+              and self.__dict__.get("compare_panel") is not None):
+            self.compare_panel.refresh_availability()
 
     # ------------------------------------------------------------------
     # Font-style preview
@@ -1183,6 +1195,29 @@ class App(tk.Tk):
         except Exception as exc:
             _log_error("studio preview", traceback.format_exc())
             self.q.put(("studio_preview_error", token, str(exc) or exc.__class__.__name__))
+
+    def _start_compare(self):
+        try:
+            request = self._preview_request()
+        except RunOptionsError as exc:
+            self.compare_panel.show_error(str(exc))
+            return
+        request.update(n=COMPARE_SAMPLES, offset=0, split=None)
+        threading.Thread(target=self._compare_worker, args=(request,), daemon=True).start()
+
+    def _compare_worker(self, request: dict):
+        """Compare preview samples with real scans; reports only through q."""
+        try:
+            real = real_scan_paths()
+            tiles = preview_samples(request["options"], count=request["count"],
+                                    seed=request["seed"], n=request["n"])
+            images = [tile.image for tile in tiles if tile.image is not None]
+            comparison = compare_image_statistics(images, real)
+            self.q.put(("studio_compare", comparison_hints(comparison), len(real),
+                        len(images)))
+        except Exception as exc:
+            _log_error("studio comparison", traceback.format_exc())
+            self.q.put(("studio_compare_error", str(exc) or exc.__class__.__name__))
 
     def _handle_preview_message(self, msg):
         """Apply a preview result on the UI thread; stale tokens are dropped."""
@@ -2202,6 +2237,10 @@ class App(tk.Tk):
                     self._merge_result = msg[1]
                 elif kind in ("studio_preview", "studio_retry", "studio_preview_error"):
                     self._handle_preview_message(msg)
+                elif kind == "studio_compare":
+                    self.compare_panel.show(*msg[1:])
+                elif kind == "studio_compare_error":
+                    self.compare_panel.show_error(msg[1])
                 elif kind == "dataset_size":
                     self._patch_row(*msg[1:])
                 elif kind == "refresh_complete":

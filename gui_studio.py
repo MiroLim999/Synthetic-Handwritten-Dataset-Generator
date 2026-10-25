@@ -702,3 +702,101 @@ class PreviewGrid(ttk.Frame):
 
     def controls(self) -> list[tk.Widget]:
         return list(self._controls)
+
+# ---------------------------------------------------------------------------
+# Compare with real scans
+# ---------------------------------------------------------------------------
+COMPARE_SAMPLES = 64
+SIMILAR_SD = 0.2
+METRIC_WORDS = {
+    "mean_luminance": ("brightness", "darker", "lighter"),
+    "luminance_std": ("tone spread", "flatter", "more varied"),
+    "robust_contrast": ("contrast", "lower contrast", "higher contrast"),
+    "ink_coverage": ("ink coverage", "less ink", "more ink"),
+    "edge_density": ("edges", "softer", "sharper"),
+    "width": ("width", "narrower", "wider"),
+    "height": ("height", "shorter", "taller"),
+    "aspect_ratio": ("aspect ratio", "less elongated", "more elongated"),
+}
+
+
+def comparison_hints(comparison) -> list[str]:
+    """Plain-language hints from an ImageStatisticsComparison."""
+    hints = []
+    for name, (label, lower, higher) in METRIC_WORDS.items():
+        metric = comparison.metrics.get(name)
+        if metric is None:
+            continue
+        sd = metric.standardized_difference
+        if sd is None:
+            hints.append(f"= {label}: no spread to compare")
+        elif abs(sd) < SIMILAR_SD:
+            hints.append(f"~ {label}: similar ({sd:+.1f} sd)")
+        else:
+            arrow = "\u2193" if sd < 0 else "\u2191"
+            word = lower if sd < 0 else higher
+            hints.append(f"{arrow} {label}: synthetic is {word} ({sd:+.1f} sd)")
+    return hints
+
+
+def real_scan_paths(limit: int = COMPARE_SAMPLES) -> list[Path]:
+    """Up to ``limit`` real images from dataset/real/images (empty if none)."""
+    from src.image_statistics import iter_image_paths
+
+    root = config.REAL_DIR / "images"
+    if not root.is_dir():
+        return []
+    paths = []
+    for path in iter_image_paths(root):
+        paths.append(path)
+        if len(paths) >= limit:
+            break
+    return paths
+
+
+class ComparePanel(ttk.Frame):
+    """Compare preview samples with real scans (disabled without real scans)."""
+
+    def __init__(self, master, *, on_compare=None, card_style: str = "Card.TFrame",
+                 hint_style: str = "CardHint.TLabel"):
+        super().__init__(master, style=card_style, padding=12)
+        self.on_compare = on_compare
+        row = ttk.Frame(self, style=card_style)
+        row.pack(fill="x")
+        self.compare_btn = ttk.Button(row, text="Compare with real scans",
+                                      style="Quick.TButton", command=self._compare)
+        self.compare_btn.pack(side="left")
+        self.status_label = ttk.Label(row, text="", style=hint_style)
+        self.status_label.pack(side="left", padx=(8, 0))
+        self.result_label = ttk.Label(self, text="", style=hint_style, justify="left",
+                                      wraplength=620)
+        self.result_label.pack(anchor="w", pady=(6, 0))
+        self.refresh_availability()
+
+    def refresh_availability(self) -> bool:
+        available = bool(real_scan_paths(limit=1))
+        self.compare_btn.config(state="normal" if available else "disabled")
+        if not available:
+            self.status_label.config(
+                text="Add real scans to dataset/real/images to compare them with "
+                     "the preview.")
+        elif self.status_label.cget("text").startswith("Add real scans"):
+            self.status_label.config(text="")
+        return available
+
+    def _compare(self) -> None:
+        if self.refresh_availability() and self.on_compare is not None:
+            self.status_label.config(text="Comparing...")
+            self.on_compare()
+
+    def show(self, hints: list[str], real_count: int, generated_count: int) -> None:
+        self.status_label.config(
+            text=f"{generated_count} preview samples vs {real_count} real scans "
+                 "(standardized differences; descriptive only).")
+        self.result_label.config(text="\n".join(hints))
+
+    def show_error(self, message: str) -> None:
+        self.status_label.config(text=f"Comparison failed: {message}")
+
+    def controls(self) -> list[tk.Widget]:
+        return [self.compare_btn]
