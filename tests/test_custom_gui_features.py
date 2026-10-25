@@ -10,6 +10,7 @@ from unittest import mock
 import config
 from src.generate_synthetic import generate
 from gui import PRESET_DIR
+from src.studio_recipe import load_recipe
 
 
 class CustomGuiFeaturesTests(unittest.TestCase):
@@ -54,9 +55,11 @@ class CustomGuiFeaturesTests(unittest.TestCase):
 
         for preset_file in json_files:
             data = json.loads(preset_file.read_text(encoding="utf-8"))
-            self.assertIn("name", data)
-            self.assertIn("fade", data)
-            self.assertIn("noise", data)
+            self.assertEqual(data["schema_version"], 2, preset_file.name)
+            recipe = load_recipe(preset_file)
+            self.assertTrue(recipe.name and recipe.description, preset_file.name)
+            self.assertEqual(recipe.sections,
+                             ("augmentation", "stroke_damage", "cutoff"))
 
     def test_short_label_degradation_safeguard_never_crashes(self):
         with tempfile.TemporaryDirectory() as temporary:

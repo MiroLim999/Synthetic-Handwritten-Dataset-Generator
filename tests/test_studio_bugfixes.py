@@ -145,16 +145,35 @@ class PresetLoadingTests(unittest.TestCase):
             app._apply_preset_values("x", {"tint": 0.2}, [])
         self.assertFalse(app._slider_updating)
 
-    def test_valid_preset_is_clamped_snapped_and_reported(self):
+    def test_old_flat_preset_is_migrated_clamped_and_reported(self):
         app = studio_app()
-        self._load(app, {"name": "X", "tint": 0.9, "jpeg": 66.4, "crop_top": 3,
-                         "mystery": 1})
+        self._load(app, {"name": "X", "tint": 0.9, "jpeg": 66.4, "crop_top": 3})
+        # Sliders show the migrated values; the run uses the recipe itself.
         self.assertEqual(app.dev_sliders["tint"].get(), gui.SLIDER_SPECS["tint"].high)
         self.assertEqual(app.dev_sliders["jpeg"].get(), 66.0)
         self.assertEqual(app.edge_clipping_var.get(), config.EDGE_CLIPPING_OPTIONS["custom"])
+        options = app._snapshot_run_options()
+        self.assertEqual(options.augmentation_profile.paper_tint_alpha_range, (0.5, 0.5))
+        self.assertEqual(options.augmentation_profile.jpeg_quality_range, (66, 66))
+        self.assertEqual(options.edge_clipping.top.fraction_range, (0.03, 0.03))
         message = app.status.config.call_args.kwargs["text"]
-        self.assertIn("crop_top, jpeg, tint", message)
-        self.assertIn("ignored mystery", message)
+        self.assertIn("augmentation, stroke_damage, cutoff", message)
+
+    def test_unknown_keys_reject_the_whole_preset(self):
+        app = studio_app()
+        showerror = self._load(app, {"tint": 0.2, "mystery": 1})
+        self.assertIn("mystery", showerror.call_args.args[1])
+        self.assertEqual(app.dev_sliders["tint"].get(), gui.SLIDER_SPECS["tint"].default)
+
+    def test_editing_a_group_drops_only_that_recipe_section(self):
+        app = studio_app("semi_broken_mixed")
+        self._load(app, {"tint": 0.3, "gap_count": 4, "crop_left": 2})
+        self.assertEqual(set(app._recipe_sections), {"augmentation", "stroke_damage",
+                                                     "cutoff"})
+        app._on_developer_slider_change("gap_prob")
+        self.assertEqual(set(app._recipe_sections), {"augmentation", "cutoff"})
+        app._on_developer_slider_change("crop_top")
+        self.assertEqual(set(app._recipe_sections), {"augmentation"})
 
     def test_preset_without_crops_sets_cutoff_to_none(self):
         app = studio_app()
@@ -192,13 +211,15 @@ class PresetSavingTests(unittest.TestCase):
             self.assertEqual(existing.read_text(encoding="utf-8"), '{"name": "original"}')
 
             app = studio_app()
+            app.degradation_var.set(config.DEGRADATION_PROFILES["custom_dev_v1"])
             app.dev_sliders["tint"].set(0.18319)
             app.dev_sliders["jpeg"].set(66.2)
             self._save(app, folder, "My Preset", overwrite=True)
             saved = json.loads(existing.read_text(encoding="utf-8"))
+            self.assertEqual(saved["schema_version"], 2)
             self.assertEqual(saved["name"], "My Preset")
-            self.assertEqual(saved["tint"], 0.18)
-            self.assertEqual(saved["jpeg"], 66)
+            self.assertEqual(saved["augmentation"]["paper_tint"]["range"], [0.18, 0.18])
+            self.assertEqual(saved["augmentation"]["jpeg"]["range"], [66, 66])
             self.assertEqual(list(folder.glob(".*.tmp")), [])
 
     def test_slug_rules(self):

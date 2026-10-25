@@ -33,17 +33,24 @@ from src import fields
 from src import studio_spec
 from src.augment import degrade
 from src.generation_profiles import (AUGMENTATION_PROFILES, CUTOFF_PROFILES,
+                                     DEFAULT_WRITER_PROFILE_ID,
                                      CutoffProfile, as_cutoff_profile,
                                      StrokeDamageProfile,
                                      augmentation_profile_from_spec,
                                      augmentation_spec_from_legacy_values,
+                                     augmentation_spec_from_profile,
+                                     cutoff_profile_from_spec,
+                                     cutoff_spec_from_profile,
+                                     stroke_damage_from_spec,
+                                     stroke_damage_spec_from_profile,
                                      get_augmentation_profile)
 from src.generate_synthetic import (GenerationCancelled, field_weights_for_mode,
                                     generate, guarded_remove_dataset,
                                     zip_dataset)
 from src.generation_io import verify_sha256_sidecar
 from src.generation_resources import preflight_generation_resources
-from src.provenance import atomic_write_json
+from src.studio_recipe import (RecipeError, StudioRecipe, load_recipe,
+                               parse_recipe, save_recipe)
 from src.build_splits import build
 from src.render import (CURSIVE_STYLE_GROUPS, fonts_for_style,
                         font_display_name, font_path_for)
@@ -189,39 +196,6 @@ if sys.stderr is None:
     sys.stderr = open(LOG_FILE, "a", encoding="utf-8")
 
 
-PRESET_METADATA_KEYS = frozenset({"name", "description"})
-
-
-def parse_preset_values(data) -> tuple[dict[str, float], list[str]]:
-    """Validate a flat studio preset before anything is applied.
-
-    Returns the slider values (clamped and snapped to each slider) and the
-    sorted unknown keys.  Any non-numeric or non-finite slider value raises
-    ``ValueError`` so a malformed preset is never half-applied.
-    """
-    if not isinstance(data, dict):
-        raise ValueError("Preset file must contain a JSON object.")
-    values: dict[str, float] = {}
-    problems = []
-    for key, raw in data.items():
-        spec = SLIDER_SPECS.get(key)
-        if spec is None:
-            continue
-        if isinstance(raw, bool) or not isinstance(raw, (int, float)):
-            problems.append(f"{key} must be a number (got {raw!r})")
-            continue
-        if not math.isfinite(float(raw)):
-            problems.append(f"{key} must be finite (got {raw!r})")
-            continue
-        values[key] = snap_value(raw, spec.step, spec.low, spec.high)
-    if problems:
-        raise ValueError("Invalid preset values: " + "; ".join(problems))
-    ignored = sorted(
-        key for key in data if key not in SLIDER_SPECS and key not in PRESET_METADATA_KEYS
-    )
-    return values, ignored
-
-
 _PRESET_PATH_CHARACTERS = frozenset('/\\:*?"<>|')
 MAX_PRESET_NAME_LENGTH = 64
 
@@ -261,14 +235,47 @@ def preset_path_for(slug: str, preset_dir: Path | None = None) -> Path:
     return path
 
 
-def preset_payload(display_name: str, slider_values: dict[str, float]) -> dict:
-    """Preset JSON with every slider value snapped to its step."""
-    data: dict[str, object] = {"name": display_name}
-    for key, raw in slider_values.items():
-        spec = SLIDER_SPECS[key]
-        value = snap_value(raw, spec.step, spec.low, spec.high)
-        data[key] = int(value) if spec.step >= 1 and float(spec.step).is_integer() else value
-    return data
+def recipe_slider_values(recipe: StudioRecipe) -> dict[str, float]:
+    """Single-value slider readings that best describe a recipe's sections.
+
+    Interim display only: runs use the recipe sections themselves.
+    """
+    values: dict[str, float] = {}
+
+    def mid(pair):
+        return (pair[0] + pair[1]) / 2.0
+
+    aug = recipe.augmentation
+    if aug is not None:
+        def on(effect, off_value, reading):
+            return reading if aug[effect]["probability"] > 0 else off_value
+        values.update({
+            "fade": on("fade", 1.0, mid(aug["fade"]["range"])),
+            "tint": on("paper_tint", 0.0, mid(aug["paper_tint"]["range"])),
+            "stain": aug["stains"]["probability"],
+            "rotate": on("rotation", 0.0, aug["rotation"]["range"][1]),
+            "blur": on("blur", 0.0, mid(aug["blur"]["range"])),
+            "noise": on("noise", 0.0, mid(aug["noise"]["range"])),
+            "texture": on("paper_texture", 0.0, mid(aug["paper_texture"]["range"])),
+            "scanline": on("scanlines", 0.0, mid(aug["scanlines"]["range"])),
+            "jpeg": on("jpeg", 100.0, mid(aug["jpeg"]["range"])),
+        })
+    stroke = recipe.stroke_damage
+    if stroke is not None:
+        values.update({
+            "contrast": stroke["contrast"]["probability"],
+            "gap_prob": stroke["gaps"]["probability"],
+            "gap_count": stroke["gaps"]["count_range"][1],
+            "scratch": stroke["scratches"]["probability"],
+            "erode": stroke["erode"]["probability"],
+        })
+    cutoff = recipe.cutoff
+    if cutoff is not None:
+        for side in studio_spec.CUTOFF_SIDES:
+            entry = cutoff[side]
+            values[f"crop_{side}"] = (
+                mid(entry["range"]) * 100.0 if entry["probability"] > 0 else 0.0)
+    return values
 
 
 def _split_percent(fraction: float) -> str:
@@ -313,6 +320,8 @@ class RunOptions:
     custom_field_weights: dict | None
     custom_split_fractions: tuple | None
     workers: int | None
+    writer_profile: str = DEFAULT_WRITER_PROFILE_ID
+    samples_per_writer: int = 32
 
 
 def _open_path_portably(path: Path, *, select_file: bool = False) -> None:
@@ -1387,21 +1396,45 @@ class App(tk.Tk):
         spec = SLIDER_SPECS[name]
         return format_value(value, spec.step, spec.unit)
 
+    def _recipe_override(self, section: str):
+        """The loaded recipe's section, kept until that group is edited."""
+        return (self.__dict__.get("_recipe_sections") or {}).get(section)
+
+    def _drop_recipe_override(self, *sections: str):
+        overrides = self.__dict__.get("_recipe_sections")
+        if overrides:
+            for section in sections:
+                overrides.pop(section, None)
+
+    def _slider_value(self, name: str) -> float:
+        """A slider's value snapped to its step."""
+        spec = SLIDER_SPECS[name]
+        return snap_value(self.dev_sliders[name].get(), spec.step, spec.low, spec.high)
+
+    def _slider_stroke_damage_profile(self) -> StrokeDamageProfile:
+        return StrokeDamageProfile.from_legacy_params({
+            "contrast_prob": self._slider_value("contrast"),
+            "gap_prob": self._slider_value("gap_prob"),
+            "gap_count": int(round(self._slider_value("gap_count"))),
+            "scratch_prob": self._slider_value("scratch"),
+            "erode_prob": self._slider_value("erode"),
+        })
+
     def _build_stroke_damage_profile(self):
         """Stroke damage profile, or None outside semi-broken modes."""
         if not hasattr(self, "dev_sliders"):
             return None
         if not self._current_sample_mode().startswith("semi_broken"):
             return None
-        return StrokeDamageProfile.from_legacy_params({
-            "contrast_prob": self.dev_sliders["contrast"].get(),
-            "gap_prob": self.dev_sliders["gap_prob"].get(),
-            "gap_count": int(round(self.dev_sliders["gap_count"].get())),
-            "scratch_prob": self.dev_sliders["scratch"].get(),
-            "erode_prob": self.dev_sliders["erode"].get(),
-        })
+        override = self._recipe_override("stroke_damage")
+        if override is not None:
+            return stroke_damage_from_spec(override)
+        return self._slider_stroke_damage_profile()
 
     def _build_custom_developer_profile(self):
+        override = self._recipe_override("augmentation")
+        if override is not None:
+            return augmentation_profile_from_spec(override)
         if not hasattr(self, "dev_sliders"):
             degradation_key = self.degradation_by_label.get(
                 self.degradation_var.get(), config.DEFAULT_DEGRADATION_PROFILE
@@ -1415,15 +1448,15 @@ class App(tk.Tk):
         # Interim mapping of the single-value sliders: chance 1.0 and
         # min = max, with a content-addressed profile ID.
         return augmentation_profile_from_spec(augmentation_spec_from_legacy_values(
-            fade_contrast=self.dev_sliders["fade"].get(),
-            paper_tint_alpha=self.dev_sliders["tint"].get(),
-            stain_prob=self.dev_sliders["stain"].get(),
-            rotate_deg=self.dev_sliders["rotate"].get(),
-            blur_radius=self.dev_sliders["blur"].get(),
-            noise_std=self.dev_sliders["noise"].get(),
-            paper_texture_std=self.dev_sliders["texture"].get(),
-            scanline_alpha=int(round(self.dev_sliders["scanline"].get())),
-            jpeg_quality=int(round(self.dev_sliders["jpeg"].get())),
+            fade_contrast=self._slider_value("fade"),
+            paper_tint_alpha=self._slider_value("tint"),
+            stain_prob=self._slider_value("stain"),
+            rotate_deg=self._slider_value("rotate"),
+            blur_radius=self._slider_value("blur"),
+            noise_std=self._slider_value("noise"),
+            paper_texture_std=self._slider_value("texture"),
+            scanline_alpha=int(round(self._slider_value("scanline"))),
+            jpeg_quality=int(round(self._slider_value("jpeg"))),
         ))
 
     def _build_cutoff_profile(self):
@@ -1432,11 +1465,14 @@ class App(tk.Tk):
         Custom sliders give each nonzero side chance 1.0 and min = max, as a
         fraction of the ink box (interim; ranges arrive with the studio UI).
         """
+        override = self._recipe_override("cutoff")
+        if override is not None:
+            return cutoff_profile_from_spec(override)
         preset_key = self.clipping_by_label.get(self.edge_clipping_var.get(), "none")
         if preset_key in CUTOFF_PROFILES or not hasattr(self, "dev_sliders"):
             return CUTOFF_PROFILES.get(preset_key, CUTOFF_PROFILES["none"])
         return as_cutoff_profile(tuple(
-            self.dev_sliders[spec.name].get() / 100.0 for spec in CROP_SLIDER_SPECS))
+            self._slider_value(spec.name) / 100.0 for spec in CROP_SLIDER_SPECS))
 
     @staticmethod
     def _profile_slider_values(profile_key: str) -> dict[str, float]:
@@ -1481,12 +1517,14 @@ class App(tk.Tk):
             self.degradation_var.get(), config.DEFAULT_DEGRADATION_PROFILE)
 
     def _on_degradation_preset_change(self, _event=None):
+        self._drop_recipe_override("augmentation")
         preset_key = self._selected_degradation_key()
         if preset_key in AUGMENTATION_PROFILES and hasattr(self, "dev_sliders"):
             self._set_slider_values(self._profile_slider_values(preset_key))
         self._update_preview()
 
     def _on_clipping_preset_change(self, _event=None):
+        self._drop_recipe_override("cutoff")
         preset_label = self.edge_clipping_var.get()
         preset_key = self.clipping_by_label.get(preset_label, "none")
         if preset_key in CUTOFF_PROFILES and hasattr(self, "dev_sliders"):
@@ -1504,9 +1542,13 @@ class App(tk.Tk):
         if getattr(self, "_slider_updating", False):
             return
         if slider_name.startswith("crop_"):
+            self._drop_recipe_override("cutoff")
             if "custom" in self.clipping_by_label.values():
                 self.edge_clipping_var.set(config.EDGE_CLIPPING_OPTIONS["custom"])
+        elif slider_name in STROKE_DAMAGE_SLIDERS:
+            self._drop_recipe_override("stroke_damage")
         else:
+            self._drop_recipe_override("augmentation")
             if "custom_dev_v1" in self.degradation_by_label.values():
                 self.degradation_var.set(config.DEGRADATION_PROFILES["custom_dev_v1"])
         self._update_preview()
@@ -1517,6 +1559,7 @@ class App(tk.Tk):
         Degradation sliders take the selected profile's values; crop and
         stroke-damage sliders return to their defaults.
         """
+        self._drop_recipe_override("augmentation", "stroke_damage", "cutoff")
         values = self._profile_slider_values(self._selected_degradation_key())
         for spec in (*CROP_SLIDER_SPECS, *STROKE_SLIDER_SPECS):
             values[spec.name] = spec.default
@@ -1635,38 +1678,99 @@ class App(tk.Tk):
             messagebox.showerror("Error", f"Preset file not found: {preset_file}")
             return
         try:
-            with open(preset_file, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            values, ignored = parse_preset_values(data)
-        except (OSError, ValueError) as exc:
+            recipe = load_recipe(preset_file)
+        except RecipeError as exc:
             messagebox.showerror("Error loading preset", str(exc))
             return
-        self._apply_preset_values(name, values, ignored)
+        self._apply_recipe_to_studio(name, recipe)
 
-    def _apply_preset_values(self, name, values, ignored):
-        """Apply validated preset values all at once."""
+    def _apply_recipe_to_studio(self, name: str, recipe: StudioRecipe):
+        """Apply only the sections a recipe contains, all at once.
+
+        Interim (until the Studio tab): effect sections drive runs directly
+        and are mirrored onto the single-value sliders for display.
+        """
+        overrides = dict(self.__dict__.get("_recipe_sections") or {})
         self._slider_updating = True
         try:
-            for key, value in values.items():
+            for key, raw in recipe_slider_values(recipe).items():
+                spec = SLIDER_SPECS[key]
+                value = snap_value(raw, spec.step, spec.low, spec.high)
                 self.dev_sliders[key].set(value)
                 self.dev_labels[key].set(self._slider_text(key, value))
-            cropped = any(
-                self.dev_sliders[spec.name].get() > 0 for spec in CROP_SLIDER_SPECS
-            )
-            self.edge_clipping_var.set(
-                config.EDGE_CLIPPING_OPTIONS["custom" if cropped else "none"])
-            self.degradation_var.set(config.DEGRADATION_PROFILES["custom_dev_v1"])
+            if recipe.augmentation is not None:
+                overrides["augmentation"] = recipe.section("augmentation")
+                self.degradation_var.set(config.DEGRADATION_PROFILES["custom_dev_v1"])
+            if recipe.stroke_damage is not None:
+                overrides["stroke_damage"] = recipe.section("stroke_damage")
+            if recipe.cutoff is not None:
+                cutoff = recipe.section("cutoff")
+                active = any(cutoff[side]["probability"] > 0
+                             for side in studio_spec.CUTOFF_SIDES)
+                if active:
+                    overrides["cutoff"] = cutoff
+                else:
+                    overrides.pop("cutoff", None)
+                self.edge_clipping_var.set(
+                    config.EDGE_CLIPPING_OPTIONS["custom" if active else "none"])
+            if recipe.run is not None:
+                self._apply_run_section(recipe.run)
         finally:
             self._slider_updating = False
+        self._recipe_sections = overrides
+        self._sync_stroke_damage_state()
         self._update_preview()
-        if len(values) == len(SLIDER_SPECS):
-            applied = f"all {len(values)} studio values"
-        else:
-            applied = ", ".join(sorted(values)) or "no studio values"
-        message = f"Loaded preset {name}: applied {applied}"
-        if ignored:
-            message += f"; ignored {', '.join(ignored)}"
-        self.status.config(text=message + ".", foreground=SUCCESS)
+        sections = ", ".join(recipe.sections) or "no sections"
+        self.status.config(text=f"Loaded preset {name}: {sections}.", foreground=SUCCESS)
+
+    def _apply_run_section(self, run: dict):
+        """Apply a recipe's run settings to the Generate-tab controls."""
+        if "sample_mode" in run:
+            self.sample_mode_var.set(config.SAMPLE_MODES[run["sample_mode"]])
+            self._field_weights_mode = run["sample_mode"]
+            self._reset_field_weights()
+        if run.get("field_weights") is not None:
+            for ftype, var in self.field_weight_vars.items():
+                var.set(str(run["field_weights"].get(ftype, 0)))
+        if "split_fractions" in run:
+            train, val, test = run["split_fractions"]
+            self.split_train_var.set(_split_percent(train))
+            self.split_val_var.set(_split_percent(val))
+            self.split_test_var.set(_split_percent(test))
+        if "names_version" in run:
+            self.names_var.set(run["names_version"])
+        if "font_style" in run:
+            label = next(label for label, key in self.font_style_options.items()
+                         if key == run["font_style"])
+            self.font_style_var.set(label)
+            self.cursive_group_var.set(run.get("cursive_group") or "All cursive")
+            self._on_font_style_change()
+            stem = run.get("specific_font", "")
+            display = next((label for label, value in self.specific_font_map.items()
+                            if value == stem), "All in group")
+            self.specific_font_var.set(display)
+        for key in ("writer_profile", "samples_per_writer"):
+            if key in run:
+                setattr(self, f"_run_{key}", run[key])
+
+    def _current_recipe(self, name: str = "", description: str = "") -> StudioRecipe:
+        """The studio state as a recipe with all three effect sections."""
+        augmentation = (self._recipe_override("augmentation")
+                        or augmentation_spec_from_profile(
+                            self._build_custom_developer_profile()))
+        stroke = (self._recipe_override("stroke_damage")
+                  or stroke_damage_spec_from_profile(self._slider_stroke_damage_profile()))
+        cutoff = (self._recipe_override("cutoff")
+                  or cutoff_spec_from_profile(self._build_cutoff_profile()))
+        return parse_recipe({
+            "format": "synthetic-generator.studio-recipe",
+            "schema_version": 2,
+            "name": name,
+            "description": description,
+            "augmentation": augmentation,
+            "stroke_damage": stroke,
+            "cutoff": cutoff,
+        })
 
     def _save_current_preset(self):
         name = simpledialog.askstring("Save Preset", "Enter a name for this Developer Studio preset:")
@@ -1683,13 +1787,10 @@ class App(tk.Tk):
                 f"A preset named '{safe_name}' already exists. Replace it?",
                 icon="warning"):
             return
-
-        data = preset_payload(
-            name.strip(), {k: var.get() for k, var in self.dev_sliders.items()})
         try:
             PRESET_DIR.mkdir(parents=True, exist_ok=True)
-            atomic_write_json(preset_file, data)
-        except OSError as exc:
+            save_recipe(preset_file, self._current_recipe(name.strip()))
+        except (OSError, ValueError) as exc:
             messagebox.showerror("Error saving preset", str(exc))
             return
         self._refresh_preset_list()
@@ -2294,6 +2395,9 @@ class App(tk.Tk):
             custom_field_weights=custom_field_weights,
             custom_split_fractions=custom_split_fractions,
             workers=workers_count,
+            writer_profile=self.__dict__.get(
+                "_run_writer_profile", DEFAULT_WRITER_PROFILE_ID),
+            samples_per_writer=self.__dict__.get("_run_samples_per_writer", 32),
         )
 
     def start(self):
@@ -2332,7 +2436,8 @@ class App(tk.Tk):
                   options.merge_real, options.package_zip, self.cancel_event,
                   options.augmentation_profile, options.edge_clipping,
                   options.stroke_damage_profile, options.custom_field_weights,
-                  options.custom_split_fractions, options.workers),
+                  options.custom_split_fractions, options.workers,
+                  options.writer_profile, options.samples_per_writer),
             daemon=False)
         self.worker.start()
 
@@ -2347,7 +2452,9 @@ class App(tk.Tk):
              stroke_damage_profile=None,
              custom_field_weights=None,
              custom_split_fractions=None,
-             workers=None):
+             workers=None,
+             writer_profile=DEFAULT_WRITER_PROFILE_ID,
+             samples_per_writer=32):
         try:
             def cb(done, total, field_type):
                 self.q.put(("progress", done, total, field_type))
@@ -2364,7 +2471,9 @@ class App(tk.Tk):
                                stroke_damage_profile=stroke_damage_profile,
                                custom_field_weights=custom_field_weights,
                                custom_split_fractions=custom_split_fractions,
-                               workers=workers)
+                               workers=workers,
+                               writer_profile=writer_profile,
+                               samples_per_writer=samples_per_writer)
             if cancel_event.is_set():
                 self.q.put(("cancelled", "Generation cancelled safely."))
                 return

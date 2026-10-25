@@ -69,4 +69,6 @@ def studio_app(mode: str = "regular", *, count: int = 12, seed: int = 42):
     app.preset_var = FakeVar("")
     app.status = mock.Mock()
     app._update_preview = mock.Mock()
+    app._on_font_style_change = mock.Mock()
+    app._recipe_sections = {}
     return app
