@@ -561,15 +561,15 @@ Acceptance criteria:
 
 Affected files: `src/studio_recipe.py` (new), `resources/presets/README.md` (new)
 
-- [ ] `StudioRecipe` has `name`, `description`, and optional sections
+- [x] `StudioRecipe` has `name`, `description`, and optional sections
       `augmentation`, `stroke_damage`, `cutoff`, and `run`. Any section may carry an
       informational `based_on`.
-- [ ] Strict validation against `studio_spec`:
+- [x] Strict validation against `studio_spec`:
       - values within bounds, and min <= max
       - unknown keys reported with their JSON path
       - `schema_version` above 2 rejected with a clear message
-- [ ] Canonical JSON (sorted keys) and `recipe_sha256()`.
-- [ ] Document the format in `resources/presets/README.md`.
+- [x] Canonical JSON (sorted keys) and `recipe_sha256()`.
+- [x] Document the format in `resources/presets/README.md`.
 
 Example (rotation `range` is the min/max absolute tilt in degrees):
 
@@ -620,7 +620,7 @@ Example (rotation `range` is the min/max absolute tilt in degrees):
 
 Affected files: `src/studio_recipe.py`, `resources/presets/*.json`
 
-- [ ] Detect old flat files (no `schema_version`) and convert them in memory, using
+- [x] Detect old flat files (no `schema_version`) and convert them in memory, using
       the same clamps as `create_custom_augmentation_profile`:
 
   | Old key | New location | Conversion |
@@ -636,84 +636,84 @@ Affected files: `src/studio_recipe.py`, `resources/presets/*.json`
   | `gap_prob`, `gap_count` | `stroke_damage.gaps` | chance; count [1, max(1, int(v))]; size from config |
   | `crop_*` (percent) | `cutoff.<side>` | if v > 0: chance 1, range [v/100, v/100], now ink-relative |
 
-- [ ] Saving always writes v2.
-- [ ] Re-author the bundled presets as v2 with real ranges and a `description`:
+- [x] Saving always writes v2.
+- [x] Re-author the bundled presets as v2 with real ranges and a `description`:
       `clean_minimal`, `heavy_damage`, `historical_faded`, `historical_1914_ledger`.
-- [ ] Migrate `profile_1.json` mechanically, rounding values to the spec steps.
+- [x] Migrate `profile_1.json` mechanically, rounding values to the spec steps.
 
 ## S4.3 Preset storage
 
 Affected files: `src/studio_recipe.py`, `.gitignore`
 
-- [ ] Built-ins in `resources/presets/*.json` are read-only.
-- [ ] User presets live in `resources/presets/user/*.json`, which is created on
+- [x] Built-ins in `resources/presets/*.json` are read-only.
+- [x] User presets live in `resources/presets/user/*.json`, which is created on
       demand and gitignored.
-- [ ] Listing returns both groups, each entry flagged built-in or user.
-- [ ] Filenames are slugs. A name clash with a built-in is refused; a clash with a
+- [x] Listing returns both groups, each entry flagged built-in or user.
+- [x] Filenames are slugs. A name clash with a built-in is refused; a clash with a
       user preset needs confirmation.
-- [ ] Duplicate, rename, delete (user presets only), import (validate, then copy
+- [x] Duplicate, rename, delete (user presets only), import (validate, then copy
       into `user/`), and export.
 
 ## S4.4 Apply and precedence rules
 
 Affected files: `src/studio_recipe.py`
 
-- [ ] `apply_recipe(settings, recipe)` changes only the sections the recipe
+- [x] `apply_recipe(settings, recipe)` changes only the sections the recipe
       contains.
-- [ ] Precedence: defaults < recipe < explicit CLI flags or later GUI edits.
+- [x] Precedence: defaults < recipe < explicit CLI flags or later GUI edits.
       Document the order.
 
 ## S4.5 Generator and provenance
 
 Affected files: `src/generate_synthetic.py`, `src/handoff_validation.py`
 
-- [ ] `generate(recipe=...)` takes the resolved sections. The existing keyword
+- [x] `generate(recipe=...)` takes the resolved sections. The existing keyword
       arguments stay as overrides.
-- [ ] Every dataset gets `studio-recipe.json`: the effective, fully resolved recipe
+- [x] Every dataset gets `studio-recipe.json`: the effective, fully resolved recipe
       with all sections.
-- [ ] Additive metadata key `studio_recipe: {file, sha256, name, source_preset,
+- [x] Additive metadata key `studio_recipe: {file, sha256, name, source_preset,
       modified}`. Its hash is checked the same way as the cutoff sidecar in S3.5.
 
 ## S4.6 CLI parity
 
 Affected files: `src/generate_synthetic.py`
 
-- [ ] New flags:
+- [x] New flags:
       - `--recipe PATH`
       - `--custom-split-fractions TR VAL TE` and `--custom-field-weights JSON`
         (the README already documents both)
       - `--cutoff {none,light,moderate,heavy}`
       - `--workers N`
       - `--print-recipe`: print the effective recipe and exit without writing
-- [ ] Every flag is validated before the output folder is reserved.
+- [x] Every flag is validated before the output folder is reserved.
 
 ## S4.7 Tests
 
 Affected files: `tests/test_studio_recipe.py` (new), `tests/test_cli_recipe_parity.py` (new)
 
-- [ ] Each section round-trips, and validation errors name the JSON path.
-- [ ] Every bundled preset loads. Migrated old values reproduce
+- [x] Each section round-trips, and validation errors name the JSON path.
+- [x] Every bundled preset loads. Migrated old values reproduce
       `create_custom_augmentation_profile` exactly.
-- [ ] Only present sections are applied, precedence holds, and built-ins cannot be
+- [x] Only present sections are applied, precedence holds, and built-ins cannot be
       overwritten.
-- [ ] Parity: the same recipe and seed through the GUI snapshot and through the CLI
+- [x] Parity: the same recipe and seed through the GUI snapshot and through the CLI
       give identical image and manifest hashes.
-- [ ] Re-running a dataset's own `studio-recipe.json` with the same seed and count
+- [x] Re-running a dataset's own `studio-recipe.json` with the same seed and count
       reproduces it exactly.
 
 ## S4.8 Docs
 
 Affected files: `README.md`
 
-- [ ] Correct the CLI section and the output structure (add `studio-recipe.json`
+- [x] Correct the CLI section and the output structure (add `studio-recipe.json`
       and `cutoff-annotations.csv`).
-- [ ] Document preset sections and import/export, and remove the claims about preset
+- [x] Document preset sections and import/export, and remove the claims about preset
       export/delete that are not true today.
 
 ### S4 verification gate
 
-- [ ] Gate commands pass, with the golden hashes unchanged.
-- [ ] Every CLI example in the README runs.
+- [x] Gate commands pass, with the golden hashes unchanged.
+- [x] Every CLI example in the README runs.
 
 ---
 
