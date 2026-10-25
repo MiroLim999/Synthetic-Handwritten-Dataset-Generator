@@ -288,19 +288,19 @@ Affected files: `tests/test_studio_bugfixes.py` (new)
 
 Affected files: `src/studio_spec.py` (new)
 
-- [ ] One entry per parameter: path (for example `augmentation.blur.range`),
+- [x] One entry per parameter: path (for example `augmentation.blur.range`),
       section, label, kind (`chance` | `range` | `value`), bounds, step, unit,
       default, tooltip, and the target profile field(s).
-- [ ] Augmentation parameters:
+- [x] Augmentation parameters:
       - chance + range: fade, brightness, paper tint, rotation (min/max absolute
         tilt), blur, noise, paper texture, scanlines, JPEG
       - stains: chance + count range + opacity range
-- [ ] Stroke damage: contrast, erode (blend range), gaps (count and size ranges),
+- [x] Stroke damage: contrast, erode (blend range), gaps (count and size ranges),
       scratches (count range).
-- [ ] Cutoff: chance + range for each side, plus max ink loss.
-- [ ] Integer parameters (scanline alpha, JPEG quality, counts, opacity) use step 1
+- [x] Cutoff: chance + range for each side, plus max ink loss.
+- [x] Integer parameters (scanline alpha, JPEG quality, counts, opacity) use step 1
       and are stored as ints.
-- [ ] Bounds are at least the clamps of `create_custom_augmentation_profile`:
+- [x] Bounds are at least the clamps of `create_custom_augmentation_profile`:
       tint <= 0.50, rotation <= 15 degrees, blur <= 5, noise <= 50, texture <= 20,
       scanlines <= 60, JPEG 10-100. They must also cover every registered profile.
 
@@ -308,84 +308,84 @@ Affected files: `src/studio_spec.py` (new)
 
 Affected files: `src/generation_profiles.py`, `src/augment.py`
 
-- [ ] Add `rotate_min_degrees = 0.0`. At 0, `_rotate` keeps its single legacy
+- [x] Add `rotate_min_degrees = 0.0`. At 0, `_rotate` keeps its single legacy
       `uniform(-max, max)` draw. Above 0, it draws a magnitude, then a sign.
-- [ ] Add `stain_count_range = (2, 6)` and `stain_opacity_range = (15, 45)`.
+- [x] Add `stain_count_range = (2, 6)` and `stain_opacity_range = (15, 45)`.
       `_stains` uses them with the same calls as today.
-- [ ] Validate the new fields in `__post_init__`; `to_metadata()` adds
+- [x] Validate the new fields in `__post_init__`; `to_metadata()` adds
       `augmentation_schema_version: 2`. Do not touch `PROFILE_SCHEMA_VERSION`.
 
 ## S2.3 Spec <-> profile builders
 
 Affected files: `src/generation_profiles.py`
 
-- [ ] Add `augmentation_profile_from_spec(spec)` and
+- [x] Add `augmentation_profile_from_spec(spec)` and
       `augmentation_spec_from_profile(profile)`.
-- [ ] Content-addressed IDs: `custom_<first 12 hex of sha256(canonical JSON)>`. When
+- [x] Content-addressed IDs: `custom_<first 12 hex of sha256(canonical JSON)>`. When
       the values equal a registered profile, reuse that profile's ID.
-- [ ] Keep `create_custom_augmentation_profile` working unchanged and mark it
+- [x] Keep `create_custom_augmentation_profile` working unchanged and mark it
       deprecated.
 
 ## S2.4 `StrokeDamageProfile`
 
 Affected files: `src/generation_profiles.py`
 
-- [ ] Fields: `contrast_probability`, `contrast_range`, `erode_probability`,
+- [x] Fields: `contrast_probability`, `contrast_range`, `erode_probability`,
       `erode_blend_range`, `gap_probability`, `gap_count_range`, `gap_size_range`,
       `scratch_probability`, `scratch_count_range`.
-- [ ] `stroke_damage_from_config()` reads the `BROKEN_*` values at call time, so
+- [x] `stroke_damage_from_config()` reads the `BROKEN_*` values at call time, so
       `mock.patch` on config keeps working.
-- [ ] `from_legacy_params(dict)` reproduces today's GUI dict exactly:
+- [x] `from_legacy_params(dict)` reproduces today's GUI dict exactly:
       - `gap_count: N` -> `gap_count_range = (1, max(1, int(N)))`
       - missing keys fall back to config, as `_semi_broken` does now
-- [ ] `constrained_for_label(label, attempt)` takes over the safeguard logic from
+- [x] `constrained_for_label(label, attempt)` takes over the safeguard logic from
       `_generate_valid_sample` and reproduces it exactly for legacy params:
       - labels of 3 or fewer characters: cap both ends of the gap-count range at
         3 x length; cap erode chance at 0.35
       - attempts above 8: scale gap chance, erode chance, and the gap-count range by
         `max(0.1, 1 - 0.1 * (attempt - 8))`, with a minimum of 1 gap
-- [ ] Add `to_metadata()` and validation; keep the class frozen and picklable.
+- [x] Add `to_metadata()` and validation; keep the class frozen and picklable.
 
 ## S2.5 Augment and generator wiring
 
 Affected files: `src/augment.py`, `src/generate_synthetic.py`
 
-- [ ] `_semi_broken` takes a `StrokeDamageProfile` and makes the same RNG calls in
+- [x] `_semi_broken` takes a `StrokeDamageProfile` and makes the same RNG calls in
       the same order for the config defaults.
-- [ ] `degrade(semi_broken_params=...)` accepts a dict, a profile, or None.
-- [ ] `generate(stroke_damage_profile=...)`, keeping `semi_broken_params` as an
+- [x] `degrade(semi_broken_params=...)` accepts a dict, a profile, or None.
+- [x] `generate(stroke_damage_profile=...)`, keeping `semi_broken_params` as an
       alias. The safeguard now applies to every semi-broken run.
-- [ ] Metadata: replace S1.9's raw `stroke_damage_params` with a top-level
+- [x] Metadata: replace S1.9's raw `stroke_damage_params` with a top-level
       `stroke_damage_profile` (`to_metadata()`).
 
 ## S2.6 GUI interim wiring
 
 Affected files: `gui.py`
 
-- [ ] `_build_custom_developer_profile()` uses `augmentation_profile_from_spec`
+- [x] `_build_custom_developer_profile()` uses `augmentation_profile_from_spec`
       with chance 1.0 and min = max. Images are unchanged; the ID becomes
       content-addressed.
-- [ ] `_build_semi_broken_params()` returns `StrokeDamageProfile.from_legacy_params(...)`.
+- [x] `_build_semi_broken_params()` returns `StrokeDamageProfile.from_legacy_params(...)`.
 
 ## S2.7 Tests
 
 Affected files: `tests/test_augmentation_spec.py` (new),
 `tests/test_stroke_damage_profiles.py` (new)
 
-- [ ] Every registered profile survives spec -> profile -> spec without loss and
+- [x] Every registered profile survives spec -> profile -> spec without loss and
       keeps its ID.
-- [ ] Content IDs are stable across processes and change whenever any value
+- [x] Content IDs are stable across processes and change whenever any value
       changes.
-- [ ] Every registered profile lies inside the spec bounds.
-- [ ] The interim GUI builder equals `create_custom_augmentation_profile`
+- [x] Every registered profile lies inside the spec bounds.
+- [x] The interim GUI builder equals `create_custom_augmentation_profile`
       field-for-field, ID aside.
-- [ ] Config-default stroke damage is byte-identical to the previous path;
+- [x] Config-default stroke damage is byte-identical to the previous path;
       `tests/test_rng_reproducibility.py` passes unmodified.
-- [ ] `from_legacy_params` and `constrained_for_label` match today's behavior.
+- [x] `from_legacy_params` and `constrained_for_label` match today's behavior.
 
 ### S2 verification gate
 
-- [ ] Gate commands pass. Only `semi_broken_*` golden configs changed; re-baseline
+- [x] Gate commands pass. Only `semi_broken_*` golden configs changed; re-baseline
       exactly those.
 
 ---
