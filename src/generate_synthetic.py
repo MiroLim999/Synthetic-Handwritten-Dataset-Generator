@@ -45,7 +45,7 @@ from tqdm import tqdm
 
 import config
 from src import fields
-from src.augment import degrade
+from src.augment import degrade_detailed
 from src.dataset_validation import (REPORT_FILENAME, assess_image_quality,
                                     validate_dataset, MONTAGE_FILENAME)
 from src.dataset_mutation import (assert_no_sibling_archive,
@@ -62,6 +62,7 @@ from src.generation_io import (AtomicCsvWriter, GenerationCounters,
 from src.generation_profiles import (DEFAULT_AUGMENTATION_PROFILE_ID,
                                      DEFAULT_WRITER_PROFILE_ID,
                                      StrokeDamageProfile,
+                                     as_cutoff_profile,
                                      as_stroke_damage_profile,
                                      get_augmentation_profile,
                                      get_writer_style_profile,
@@ -281,6 +282,7 @@ def _generate_valid_sample(field_type: str, split: str, file_name: str,
     )
     if damage_profile == "semi_broken" and stroke_damage_profile is None:
         stroke_damage_profile = stroke_damage_from_config()
+    cutoff_profile = as_cutoff_profile(edge_clipping)
     failures = []
     for attempt in range(1, MAX_SAMPLE_ATTEMPTS + 1):
         format_profile = evaluation_policy.format_profile_for_field(
@@ -310,7 +312,7 @@ def _generate_valid_sample(field_type: str, split: str, file_name: str,
             current_edge_clipping = "none"
         else:
             current_damage_profile = damage_profile
-            current_edge_clipping = edge_clipping
+            current_edge_clipping = cutoff_profile.constrained_for_label(label)
             # Short-label safeguard and progressive backoff for every
             # semi-broken run.
             current_stroke_damage = (
@@ -318,7 +320,7 @@ def _generate_valid_sample(field_type: str, split: str, file_name: str,
                 if damage_profile == "semi_broken" else None
             )
 
-        image = degrade(
+        degraded = degrade_detailed(
             image,
             damage_profile=current_damage_profile,
             rng=rng,
@@ -328,11 +330,12 @@ def _generate_valid_sample(field_type: str, split: str, file_name: str,
             semi_broken_params=current_stroke_damage,
         )
         image = evaluation_policy.apply_degradation_holdout(
-            image, split, sample_key=file_name
+            degraded.image, split, sample_key=file_name
         )
-        _statistics, errors, _warnings = assess_image_quality(image)
+        _statistics, errors, _warnings = assess_image_quality(
+            image, cut_sides=degraded.cutoff.cut_sides)
         if not errors:
-            return label, image, font_used, format_profile, format_id
+            return label, image, font_used, format_profile, format_id, degraded.cutoff
         failures = errors
     detail = "; ".join(failures) or "unknown image-quality failure"
     raise ValueError(
@@ -357,7 +360,7 @@ def _process_one_worker_task(task_args):
     style = writer_style_for(synthetic_writer_id, seed, writer_profile)
 
     (label, img, font_used, format_profile,
-     format_id) = _generate_valid_sample(
+     format_id, cutoff_result) = _generate_valid_sample(
         field_type,
         split,
         file_name,
@@ -374,7 +377,8 @@ def _process_one_worker_task(task_args):
         stroke_damage_profile=stroke_damage_profile,
     )
     img.save(out_file)
-    return (i, file_name, label, split, field_type, font_used, format_profile, format_id)
+    return (i, file_name, label, split, field_type, font_used, format_profile,
+            format_id, cutoff_result)
 
 
 def _run_metadata(*, seed: int, count: int, sample_mode: str,
@@ -696,7 +700,7 @@ def generate(count: int, dataset=None, seed: int = config.RANDOM_SEED,
             item_np_rng = np.random.default_rng(item_seed)
 
             (label, img, font_used, format_profile,
-             format_id) = _generate_valid_sample(
+             format_id, cutoff_result) = _generate_valid_sample(
                 field_type,
                 split,
                 file_name,
@@ -715,7 +719,8 @@ def generate(count: int, dataset=None, seed: int = config.RANDOM_SEED,
             out_file = split_dirs[split] / file_name
             img.save(out_file)
 
-            return (i, file_name, label, split, field_type, font_used, format_profile, format_id)
+            return (i, file_name, label, split, field_type, font_used,
+                    format_profile, format_id, cutoff_result)
 
         if workers is not None and workers > 0:
             workers = max(1, min(workers, (os.cpu_count() or 16) * 2))
@@ -796,7 +801,8 @@ def generate(count: int, dataset=None, seed: int = config.RANDOM_SEED,
                 progress.close()
 
             for idx in sorted(results.keys()):
-                (i, file_name, label, split, field_type, font_used, format_profile, format_id) = results[idx]
+                (i, file_name, label, split, field_type, font_used, format_profile,
+                 format_id, _cutoff_result) = results[idx]
                 manifest_writer.write({
                     "filename": file_name,
                     "label": label,

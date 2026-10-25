@@ -260,8 +260,14 @@ def _sql_scalar(
     return default if value is None else value
 
 
-def assess_image_quality(image: Image.Image) -> tuple[dict, list[str], list[str]]:
-    """Measure one in-memory crop and return statistics, errors, and warnings."""
+def assess_image_quality(
+    image: Image.Image, *, cut_sides: frozenset[str] = frozenset()
+) -> tuple[dict, list[str], list[str]]:
+    """Measure one in-memory crop and return statistics, errors, and warnings.
+
+    ``cut_sides`` names sides cut on purpose (top/bottom/left/right); ink is
+    allowed there, and the edge-ink threshold uses only the other sides.
+    """
     errors: list[str] = []
     warnings: list[str] = []
     original_mode = image.mode
@@ -294,15 +300,22 @@ def assess_image_quality(image: Image.Image) -> tuple[dict, list[str], list[str]
     dark = pixels < 210
     ink = pixels < 128
     ink_coverage = float(dark.mean())
-    edge_ink = int(ink[:2, :].sum() + ink[-2:, :].sum() + ink[:, :2].sum() + ink[:, -2:].sum())
-    edge_area = max(1, (2 * width * 2) + (2 * height * 2))
+    side_ink = {
+        "top": (int(ink[:2, :].sum()), 2 * width),
+        "bottom": (int(ink[-2:, :].sum()), 2 * width),
+        "left": (int(ink[:, :2].sum()), 2 * height),
+        "right": (int(ink[:, -2:].sum()), 2 * height),
+    }
+    checked = [value for side, value in side_ink.items() if side not in cut_sides]
+    edge_ink = sum(count for count, _area in checked)
+    edge_area = max(1, sum(area for _count, area in checked))
     clipped_threshold = max(3, math.ceil(edge_area * 0.002))
 
     if contrast < 5:
         errors.append(f"insufficient contrast ({contrast:.2f})")
     if ink_coverage < 0.0002:
         errors.append(f"nearly blank ({ink_coverage:.6f} dark coverage)")
-    if edge_ink >= clipped_threshold:
+    if checked and edge_ink >= clipped_threshold:
         errors.append(f"dark ink reaches the image edge ({edge_ink} pixels)")
 
     aspect_ratio = width / height
@@ -325,11 +338,13 @@ def assess_image_quality(image: Image.Image) -> tuple[dict, list[str], list[str]
     )
 
 
-def _image_quality(path: Path) -> tuple[dict, list[str], list[str]]:
+def _image_quality(
+    path: Path, cut_sides: frozenset[str] = frozenset()
+) -> tuple[dict, list[str], list[str]]:
     with Image.open(path) as opened:
         opened.verify()
     with Image.open(path) as opened:
-        return assess_image_quality(opened)
+        return assess_image_quality(opened, cut_sides=cut_sides)
 
 
 def _percentile(values: list[float], percentile: float) -> float:

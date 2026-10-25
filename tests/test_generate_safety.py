@@ -12,6 +12,7 @@ from PIL import Image, ImageDraw
 
 import config
 from src import generate_synthetic as generator
+from src.augment import DegradeResult
 from src.provenance import hash_dataset_images
 
 
@@ -53,8 +54,8 @@ class GenerateSafetyTests(unittest.TestCase):
             stack.enter_context(mock.patch.object(generator, "render_text", side_effect=render))
             stack.enter_context(mock.patch.object(
                 generator,
-                "degrade",
-                side_effect=lambda image, damage_profile, **_kwargs: image,
+                "degrade_detailed",
+                side_effect=lambda image, damage_profile, **_kwargs: DegradeResult(image),
             ))
             yield
 
@@ -112,8 +113,8 @@ class GenerateSafetyTests(unittest.TestCase):
             stack.enter_context(mock.patch.object(
                 generator, "render_text", side_effect=render))
             stack.enter_context(mock.patch.object(
-                generator, "degrade",
-                side_effect=lambda image, **_kwargs: image))
+                generator, "degrade_detailed",
+                side_effect=lambda image, **_kwargs: DegradeResult(image)))
             yield
 
     def test_run_seed_reproduces_manifest_and_image_hashes(self):
