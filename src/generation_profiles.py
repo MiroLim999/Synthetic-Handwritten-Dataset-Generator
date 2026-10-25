@@ -812,6 +812,211 @@ def augmentation_spec_from_legacy_values(
     }
 
 
+CUTOFF_SCHEMA_VERSION = 1
+CUTOFF_METHOD = "ink_bbox_v1"
+CUTOFF_SIDE_NAMES = ("top", "bottom", "left", "right")
+
+
+@dataclass(frozen=True)
+class CutoffSide:
+    """Chance and fraction range for cutting one side of the ink box.
+
+    Fractions are of the ink box: its height for top/bottom, its width for
+    left/right.
+    """
+
+    probability: float = 0.0
+    fraction_range: tuple[float, float] = (0.0, 0.0)
+
+    def __post_init__(self) -> None:
+        _probability("probability", self.probability)
+        _, high = _range("fraction_range", self.fraction_range, minimum=0)
+        if high >= 1:
+            raise ValueError("fraction_range values must be below 1")
+
+    @property
+    def active(self) -> bool:
+        return self.probability > 0
+
+
+@dataclass(frozen=True)
+class CutoffProfile:
+    """Ink-relative character cutoff (method ``ink_bbox_v1``)."""
+
+    profile_id: str
+    top: CutoffSide = CutoffSide()
+    bottom: CutoffSide = CutoffSide()
+    left: CutoffSide = CutoffSide()
+    right: CutoffSide = CutoffSide()
+    max_ink_loss: float = 0.0
+    short_label_chars: int = 3
+    short_label_max_fraction: float = 0.10
+    method: str = CUTOFF_METHOD
+
+    def __post_init__(self) -> None:
+        if not self.profile_id:
+            raise ValueError("profile_id cannot be empty")
+        for name in CUTOFF_SIDE_NAMES:
+            if not isinstance(getattr(self, name), CutoffSide):
+                raise ValueError(f"{name} must be a CutoffSide")
+        loss = _finite("max_ink_loss", self.max_ink_loss)
+        if not 0 <= loss < 1:
+            raise ValueError("max_ink_loss must be in [0, 1)")
+        if (isinstance(self.short_label_chars, bool)
+                or not isinstance(self.short_label_chars, Integral)
+                or self.short_label_chars < 0):
+            raise ValueError("short_label_chars must be a nonnegative integer")
+        cap = _finite("short_label_max_fraction", self.short_label_max_fraction)
+        if not 0 <= cap < 1:
+            raise ValueError("short_label_max_fraction must be in [0, 1)")
+        if self.method != CUTOFF_METHOD:
+            raise ValueError(f"Unsupported cutoff method {self.method!r}")
+
+    def sides(self) -> tuple[tuple[str, CutoffSide], ...]:
+        return tuple((name, getattr(self, name)) for name in CUTOFF_SIDE_NAMES)
+
+    @property
+    def active(self) -> bool:
+        """Whether any side can be cut (only then is an ink mask built)."""
+        return any(side.active for _name, side in self.sides())
+
+    def constrained_for_label(self, label: str) -> "CutoffProfile":
+        """Short labels get no side cuts and capped vertical cuts."""
+        if len(label.strip()) > self.short_label_chars:
+            return self
+        cap = self.short_label_max_fraction
+
+        def capped(side: CutoffSide) -> CutoffSide:
+            low, high = side.fraction_range
+            return replace(side, fraction_range=(min(low, cap), min(high, cap)))
+
+        return replace(self, top=capped(self.top), bottom=capped(self.bottom),
+                       left=CutoffSide(), right=CutoffSide())
+
+    def to_metadata(self) -> dict[str, object]:
+        return {
+            "cutoff_schema_version": CUTOFF_SCHEMA_VERSION,
+            **asdict(self),
+        }
+
+
+def _cutoff_side(probability: float, low: float, high: float) -> CutoffSide:
+    return CutoffSide(probability, (low, high))
+
+
+CUTOFF_PROFILES: dict[str, CutoffProfile] = {
+    "none": CutoffProfile(profile_id="none"),
+    "light": CutoffProfile(
+        profile_id="light",
+        top=_cutoff_side(0.50, 0.03, 0.08),
+        bottom=_cutoff_side(0.50, 0.03, 0.08),
+        max_ink_loss=0.10,
+    ),
+    "moderate": CutoffProfile(
+        profile_id="moderate",
+        top=_cutoff_side(0.60, 0.06, 0.14),
+        bottom=_cutoff_side(0.60, 0.06, 0.14),
+        left=_cutoff_side(0.15, 0.02, 0.05),
+        right=_cutoff_side(0.15, 0.02, 0.05),
+        max_ink_loss=0.15,
+    ),
+    "heavy": CutoffProfile(
+        profile_id="heavy",
+        top=_cutoff_side(0.75, 0.10, 0.22),
+        bottom=_cutoff_side(0.75, 0.10, 0.22),
+        left=_cutoff_side(0.30, 0.03, 0.08),
+        right=_cutoff_side(0.30, 0.03, 0.08),
+        max_ink_loss=0.20,
+    ),
+}
+
+
+def _cutoff_values(profile: CutoffProfile) -> dict[str, object]:
+    """Every profile value except the ID, with numbers normalized."""
+    values: dict[str, object] = {
+        name: {"probability": float(side.probability),
+               "fraction_range": [float(v) for v in side.fraction_range]}
+        for name, side in profile.sides()
+    }
+    values.update({
+        "max_ink_loss": float(profile.max_ink_loss),
+        "short_label_chars": int(profile.short_label_chars),
+        "short_label_max_fraction": float(profile.short_label_max_fraction),
+        "method": profile.method,
+    })
+    return values
+
+
+def cutoff_profile_id(profile: CutoffProfile) -> str:
+    """Registered ID when the values match a built-in, else a content ID."""
+    values = _cutoff_values(profile)
+    for profile_id, registered in CUTOFF_PROFILES.items():
+        if _cutoff_values(registered) == values:
+            return profile_id
+    return content_id("cutoff", values)
+
+
+def _with_content_id(profile: CutoffProfile) -> CutoffProfile:
+    return replace(profile, profile_id=cutoff_profile_id(profile))
+
+
+def cutoff_profile_from_spec(spec: Mapping) -> CutoffProfile:
+    """Build a profile from a studio ``cutoff`` section."""
+    data = studio_spec.require_valid_section("cutoff", spec)
+    sides = {
+        name: CutoffSide(float(data[name]["probability"]),
+                         tuple(float(v) for v in data[name]["range"]))
+        for name in CUTOFF_SIDE_NAMES
+    }
+    return _with_content_id(CutoffProfile(
+        profile_id="pending", max_ink_loss=float(data["max_ink_loss"]), **sides))
+
+
+def cutoff_spec_from_profile(profile: str | CutoffProfile) -> dict:
+    """The complete studio ``cutoff`` section for a profile."""
+    profile = get_cutoff_profile(profile)
+    data: dict[str, object] = {
+        name: {"probability": float(side.probability),
+               "range": [float(v) for v in side.fraction_range]}
+        for name, side in profile.sides()
+    }
+    data["max_ink_loss"] = float(profile.max_ink_loss)
+    return data
+
+
+def get_cutoff_profile(profile: str | CutoffProfile = "none") -> CutoffProfile:
+    if isinstance(profile, CutoffProfile):
+        return profile
+    try:
+        return CUTOFF_PROFILES[profile]
+    except (KeyError, TypeError):
+        valid = ", ".join(CUTOFF_PROFILES)
+        raise ValueError(f"Unknown cutoff profile {profile!r}; choose {valid}") from None
+
+
+def as_cutoff_profile(value) -> CutoffProfile:
+    """Accept a profile, a registered ID, None, or a legacy 4-tuple.
+
+    A ``(top, bottom, left, right)`` tuple of fractions becomes a custom
+    profile that always cuts each nonzero side by exactly that fraction of
+    the ink box, with the spec's default ink-loss limit.
+    """
+    if value is None or value == "":
+        return CUTOFF_PROFILES["none"]
+    if isinstance(value, (tuple, list)):
+        if len(value) != 4:
+            raise ValueError("A cutoff tuple needs (top, bottom, left, right)")
+        sides = {}
+        for name, raw in zip(CUTOFF_SIDE_NAMES, value):
+            fraction = max(0.0, float(raw))
+            sides[name] = (CutoffSide(1.0, (fraction, fraction)) if fraction > 0
+                           else CutoffSide())
+        default_loss = studio_spec.PARAMS_BY_PATH["cutoff.max_ink_loss"].default
+        return _with_content_id(CutoffProfile(
+            profile_id="pending", max_ink_loss=float(default_loss), **sides))
+    return get_cutoff_profile(value)
+
+
 def _style_seed(seed: int, writer_id: str, profile_id: str) -> tuple[int, str]:
     payload = (
         f"writer-style\0{PROFILE_SCHEMA_VERSION}\0{profile_id}\0{seed}\0{writer_id}"
