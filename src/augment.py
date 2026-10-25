@@ -12,7 +12,8 @@ import numpy as np
 from PIL import Image, ImageEnhance, ImageFilter, ImageDraw
 
 import config
-from src.generation_profiles import (AugmentationProfile,
+from src.generation_profiles import (AugmentationProfile, StrokeDamageProfile,
+                                     as_stroke_damage_profile,
                                      get_augmentation_profile)
 
 
@@ -172,7 +173,8 @@ def _ink_bbox(img: Image.Image) -> tuple[int, int, int, int]:
     )
 
 
-def _ink_gaps(img: Image.Image, rng=None, max_gap_count=None) -> Image.Image:
+def _ink_gaps(img: Image.Image, rng=None, count_range=None,
+             size_range=None) -> Image.Image:
     """Erase tiny local pieces of strokes to mimic broken characters."""
     rng = _python_rng(rng)
     img = img.convert("RGB")
@@ -182,9 +184,9 @@ def _ink_gaps(img: Image.Image, rng=None, max_gap_count=None) -> Image.Image:
     if len(xs) == 0 or len(ys) == 0:
         return img
 
-    min_gap, max_gap = config.BROKEN_INK_GAP_SIZE
-    gap_count_range = config.BROKEN_INK_GAP_COUNT if max_gap_count is None else (1, max(1, int(max_gap_count)))
-    count = rng.randint(*gap_count_range) if isinstance(gap_count_range, tuple) else gap_count_range
+    min_gap, max_gap = config.BROKEN_INK_GAP_SIZE if size_range is None else size_range
+    count_range = config.BROKEN_INK_GAP_COUNT if count_range is None else count_range
+    count = rng.randint(*count_range)
     for _ in range(count):
         w = rng.randint(min_gap, max_gap)
         h = rng.randint(1, max(2, max_gap // 2))
@@ -201,14 +203,15 @@ def _ink_gaps(img: Image.Image, rng=None, max_gap_count=None) -> Image.Image:
     return img
 
 
-def _scratches(img: Image.Image, rng=None) -> Image.Image:
+def _scratches(img: Image.Image, rng=None, count_range=None) -> Image.Image:
     """Draw faint paper-colored scratches across parts of the text."""
     rng = _python_rng(rng)
+    count_range = config.BROKEN_SCRATCH_COUNT if count_range is None else count_range
     img = img.convert("RGB")
     draw = ImageDraw.Draw(img, "RGBA")
     w, h = img.size
     x0, y0, x1, y1 = _ink_bbox(img)
-    for _ in range(rng.randint(*config.BROKEN_SCRATCH_COUNT)):
+    for _ in range(rng.randint(*count_range)):
         length = rng.randint(max(8, w // 5), max(10, w))
         angle = rng.uniform(-0.35, 0.35)
         sx = rng.randint(0, max(0, w - 1))
@@ -221,38 +224,41 @@ def _scratches(img: Image.Image, rng=None) -> Image.Image:
     return img
 
 
-def _erode_ink(img: Image.Image, rng=None) -> Image.Image:
+def _erode_ink(img: Image.Image, rng=None, blend_range=None) -> Image.Image:
     """Lightly shrink dark strokes so some thin parts disappear."""
     rng = _python_rng(rng)
+    blend_range = config.BROKEN_ERODE_BLEND if blend_range is None else blend_range
     eroded = img.filter(ImageFilter.MaxFilter(3))
     return Image.blend(img.convert("RGB"), eroded.convert("RGB"),
-                       rng.uniform(*config.BROKEN_ERODE_BLEND))
+                       rng.uniform(*blend_range))
 
 
-def _broken_contrast(img: Image.Image, rng=None) -> Image.Image:
+def _broken_contrast(img: Image.Image, rng=None, factor_range=None) -> Image.Image:
     rng = _python_rng(rng)
-    factor = rng.uniform(*config.BROKEN_CONTRAST_RANGE)
+    factor_range = config.BROKEN_CONTRAST_RANGE if factor_range is None else factor_range
+    factor = rng.uniform(*factor_range)
     return ImageEnhance.Contrast(img).enhance(factor)
 
 
-def _semi_broken(img: Image.Image, rng=None, params: dict | None = None) -> Image.Image:
-    """Apply extra localized damage for semi-broken text samples."""
-    rng = _python_rng(rng)
-    params = params or {}
-    contrast_prob = params.get("contrast_prob", config.BROKEN_CONTRAST_PROB)
-    erode_prob = params.get("erode_prob", config.BROKEN_ERODE_PROB)
-    gap_prob = params.get("gap_prob", config.BROKEN_INK_GAP_PROB)
-    gap_count = params.get("gap_count", None)
-    scratch_prob = params.get("scratch_prob", config.BROKEN_SCRATCH_PROB)
+def _semi_broken(img: Image.Image, rng=None,
+                 profile: StrokeDamageProfile | dict | None = None) -> Image.Image:
+    """Apply extra localized damage for semi-broken text samples.
 
-    if rng.random() < contrast_prob:
-        img = _broken_contrast(img, rng=rng)
-    if rng.random() < erode_prob:
-        img = _erode_ink(img, rng=rng)
-    if rng.random() < gap_prob:
-        img = _ink_gaps(img, rng=rng, max_gap_count=gap_count)
-    if rng.random() < scratch_prob:
-        img = _scratches(img, rng=rng)
+    ``profile`` may be a :class:`StrokeDamageProfile`, a legacy params dict,
+    or None for the config defaults; all three make the same RNG calls in
+    the same order.
+    """
+    rng = _python_rng(rng)
+    profile = as_stroke_damage_profile(profile)
+    if rng.random() < profile.contrast_probability:
+        img = _broken_contrast(img, rng=rng, factor_range=profile.contrast_range)
+    if rng.random() < profile.erode_probability:
+        img = _erode_ink(img, rng=rng, blend_range=profile.erode_blend_range)
+    if rng.random() < profile.gap_probability:
+        img = _ink_gaps(img, rng=rng, count_range=profile.gap_count_range,
+                        size_range=profile.gap_size_range)
+    if rng.random() < profile.scratch_probability:
+        img = _scratches(img, rng=rng, count_range=profile.scratch_count_range)
     return img
 
 
@@ -300,7 +306,7 @@ def degrade(img: Image.Image, damage_profile: str = "regular",
             rng=None, np_rng=None,
             augmentation_profile: str | AugmentationProfile | None = None,
             edge_clipping: str | tuple[float, float, float, float] = "none",
-            semi_broken_params: dict | None = None,
+            semi_broken_params: StrokeDamageProfile | dict | None = None,
             ) -> Image.Image:
     """Apply the full random augmentation chain.
 
@@ -373,7 +379,7 @@ def degrade(img: Image.Image, damage_profile: str = "regular",
                           opacity_range=profile.stain_opacity_range)
     # Params only tune semi-broken damage; they never switch it on.
     if damage_profile.startswith("semi_broken"):
-        img = _semi_broken(img, rng=rng, params=semi_broken_params)
+        img = _semi_broken(img, rng=rng, profile=semi_broken_params)
     if rng.random() < rotate_probability:
         img = _rotate(
             img,

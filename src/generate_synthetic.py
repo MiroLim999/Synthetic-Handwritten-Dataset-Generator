@@ -61,8 +61,11 @@ from src.generation_io import (AtomicCsvWriter, GenerationCounters,
                                verify_sha256_sidecar, write_sha256_sidecar)
 from src.generation_profiles import (DEFAULT_AUGMENTATION_PROFILE_ID,
                                      DEFAULT_WRITER_PROFILE_ID,
+                                     StrokeDamageProfile,
+                                     as_stroke_damage_profile,
                                      get_augmentation_profile,
                                      get_writer_style_profile,
+                                     stroke_damage_from_config,
                                      writer_style_for)
 from src.generation_resources import preflight_generation_resources
 from src.manifest import (MANIFEST_COLUMNS, MANIFEST_SCHEMA_VERSION,
@@ -97,6 +100,7 @@ GENERATOR_SOURCE_FILES = (
     "src/provenance.py",
     "src/render.py",
     "src/split_policy.py",
+    "src/studio_spec.py",
 )
 FORMAT_SOURCE_COLUMNS = (
     "filename", "field_type", "format_profile", "format_id",
@@ -270,11 +274,13 @@ def _generate_valid_sample(field_type: str, split: str, file_name: str,
                            rng: random.Random,
                            np_rng: np.random.Generator,
                            edge_clipping: str = "none",
-                           semi_broken_params: dict | None = None):
+                           stroke_damage_profile: StrokeDamageProfile | None = None):
     """Generate one quality-checked crop, retrying stochastic failures."""
     damage_profile = (
         "semi_broken" if sample_mode.startswith("semi_broken") else "regular"
     )
+    if damage_profile == "semi_broken" and stroke_damage_profile is None:
+        stroke_damage_profile = stroke_damage_from_config()
     failures = []
     for attempt in range(1, MAX_SAMPLE_ATTEMPTS + 1):
         format_profile = evaluation_policy.format_profile_for_field(
@@ -295,35 +301,22 @@ def _generate_valid_sample(field_type: str, split: str, file_name: str,
             writer_style=writer_style,
             font_pool=evaluation_policy.fonts_for_split(split),
         )
-        current_semi_params = dict(semi_broken_params) if semi_broken_params else {}
         current_aug_profile = augmentation_profile
-
-        # Length-aware safeguard for short labels (1-3 chars) like age, sex, character
-        if len(label.strip()) <= 3:
-            max_gaps = max(1, len(label.strip()) * 3)
-            if "gap_count" in current_semi_params:
-                current_semi_params["gap_count"] = min(current_semi_params["gap_count"], max_gaps)
-            if "erode_prob" in current_semi_params:
-                current_semi_params["erode_prob"] = min(current_semi_params.get("erode_prob", 0.5), 0.35)
-
-        # Progressive attempt backoff if stochastic damage wipes out a crop
-        if attempt > 8 and current_semi_params:
-            scale = max(0.1, 1.0 - ((attempt - 8) * 0.1))
-            if "gap_count" in current_semi_params:
-                current_semi_params["gap_count"] = max(1, int(current_semi_params["gap_count"] * scale))
-            if "erode_prob" in current_semi_params:
-                current_semi_params["erode_prob"] = current_semi_params["erode_prob"] * scale
-            if "gap_prob" in current_semi_params:
-                current_semi_params["gap_prob"] = current_semi_params["gap_prob"] * scale
 
         # Fail-safe recovery for extreme attempts (>15): use safe parameters so massive jobs never crash
         if attempt > 15:
             current_damage_profile = "regular"
-            current_semi_params = None
+            current_stroke_damage = None
             current_edge_clipping = "none"
         else:
             current_damage_profile = damage_profile
             current_edge_clipping = edge_clipping
+            # Short-label safeguard and progressive backoff for every
+            # semi-broken run.
+            current_stroke_damage = (
+                stroke_damage_profile.constrained_for_label(label, attempt)
+                if damage_profile == "semi_broken" else None
+            )
 
         image = degrade(
             image,
@@ -332,7 +325,7 @@ def _generate_valid_sample(field_type: str, split: str, file_name: str,
             np_rng=np_rng,
             augmentation_profile=current_aug_profile,
             edge_clipping=current_edge_clipping,
-            semi_broken_params=current_semi_params if current_semi_params else None,
+            semi_broken_params=current_stroke_damage,
         )
         image = evaluation_policy.apply_degradation_holdout(
             image, split, sample_key=file_name
@@ -352,7 +345,7 @@ def _process_one_worker_task(task_args):
     (i, field_type, split, file_name, names_dir_str, sample_mode,
      font_style, cursive_group, synthetic_writer_id, seed,
      writer_profile, augmentation_profile, edge_clipping,
-     semi_broken_params, effective_fonts, out_file_str) = task_args
+     stroke_damage_profile, effective_fonts, out_file_str) = task_args
 
     names_dir = Path(names_dir_str)
     out_file = Path(out_file_str)
@@ -378,7 +371,7 @@ def _process_one_worker_task(task_args):
         item_rng,
         item_np_rng,
         edge_clipping=edge_clipping,
-        semi_broken_params=semi_broken_params,
+        stroke_damage_profile=stroke_damage_profile,
     )
     img.save(out_file)
     return (i, file_name, label, split, field_type, font_used, format_profile, format_id)
@@ -393,7 +386,7 @@ def _run_metadata(*, seed: int, count: int, sample_mode: str,
                   writer_profile, augmentation_profile,
                   counters: GenerationCounters, writer_assigner,
                   edge_clipping: str = "none",
-                  stroke_damage_params: dict | None = None,
+                  stroke_damage_profile: StrokeDamageProfile | None = None,
                   field_weights: dict | None = None,
                   split_fractions: tuple | None = None) -> dict:
     """Build the complete provenance record written before publication."""
@@ -418,7 +411,6 @@ def _run_metadata(*, seed: int, count: int, sample_mode: str,
             "specific_font": specific_font,
             "edge_clipping": edge_clipping,
             "font_files": [Path(path).name for path in effective_fonts],
-            "stroke_damage_params": stroke_damage_params,
             "field_weights": field_weights,
             "split_fractions": list(split_fractions) if split_fractions else None,
         },
@@ -436,6 +428,10 @@ def _run_metadata(*, seed: int, count: int, sample_mode: str,
         "image_statistics": IMAGE_STATISTICS_FILENAME,
         "writer_style_profile": writer_profile.to_metadata(),
         "augmentation_profile": augmentation_profile.to_metadata(),
+        "stroke_damage_profile": (
+            None if stroke_damage_profile is None
+            else stroke_damage_profile.to_metadata()
+        ),
         "generation_resources": resource_estimate.to_metadata(),
         "generation_counters": counters.to_metadata(),
         "synthetic_writer_assignment": writer_assigner.to_metadata(),
@@ -447,24 +443,6 @@ def _run_metadata(*, seed: int, count: int, sample_mode: str,
         "validation_report": REPORT_FILENAME,
         "real_merge": None,
     }
-
-
-def _effective_stroke_damage_params(sample_mode: str,
-                                    semi_broken_params: dict | None) -> dict | None:
-    """Stroke-damage settings a run actually used (None outside semi-broken)."""
-    if not sample_mode.startswith("semi_broken"):
-        return None
-    params = dict(semi_broken_params or {})
-    effective = {
-        "contrast_prob": params.get("contrast_prob", config.BROKEN_CONTRAST_PROB),
-        "erode_prob": params.get("erode_prob", config.BROKEN_ERODE_PROB),
-        "gap_prob": params.get("gap_prob", config.BROKEN_INK_GAP_PROB),
-        "gap_count": params.get("gap_count"),
-        "scratch_prob": params.get("scratch_prob", config.BROKEN_SCRATCH_PROB),
-    }
-    if effective["gap_count"] is None:
-        effective["gap_count_range"] = list(config.BROKEN_INK_GAP_COUNT)
-    return effective
 
 
 def _write_evaluation_annotations_streaming(
@@ -570,11 +548,17 @@ def generate(count: int, dataset=None, seed: int = config.RANDOM_SEED,
              augmentation_profile=DEFAULT_AUGMENTATION_PROFILE_ID,
              samples_per_writer: int = 32,
              edge_clipping: str | tuple[float, float, float, float] = "none",
-             semi_broken_params: dict | None = None,
+             semi_broken_params: dict | StrokeDamageProfile | None = None,
              custom_field_weights: dict[str, int] | None = None,
              custom_split_fractions: tuple[float, float, float] | None = None,
-             workers: int | None = None):
-    """Generate synthetic samples into a numbered dataset folder."""
+             workers: int | None = None,
+             stroke_damage_profile: StrokeDamageProfile | None = None):
+    """Generate synthetic samples into a numbered dataset folder.
+
+    ``stroke_damage_profile`` tunes semi-broken damage; ``semi_broken_params``
+    is the older alias and also accepts the legacy GUI dict.  Neither has
+    any effect outside semi-broken modes.
+    """
     sample_mode, names_dir = _preflight_generation(
         count,
         names_version,
@@ -599,6 +583,15 @@ def generate(count: int, dataset=None, seed: int = config.RANDOM_SEED,
     effective_fonts = tuple(str(font) for font in effective_fonts)
     writer_profile = get_writer_style_profile(writer_profile)
     augmentation_profile = get_augmentation_profile(augmentation_profile)
+    if stroke_damage_profile is not None and semi_broken_params is not None:
+        raise ValueError(
+            "Pass stroke_damage_profile or its alias semi_broken_params, not both")
+    stroke_damage_profile = (
+        as_stroke_damage_profile(
+            semi_broken_params if stroke_damage_profile is None
+            else stroke_damage_profile)
+        if sample_mode.startswith("semi_broken") else None
+    )
     writer_assigner = SyntheticWriterAssigner(samples_per_writer=samples_per_writer)
     resource_estimate = preflight_generation_resources(
         config.DATASETS_DIR,
@@ -681,7 +674,7 @@ def generate(count: int, dataset=None, seed: int = config.RANDOM_SEED,
                 i, field_type, split, file_name, str(names_dir), sample_mode,
                 font_style, cursive_group, synthetic_writer_id, seed,
                 writer_profile, augmentation_profile, edge_clipping,
-                semi_broken_params, effective_fonts, str(out_file)
+                stroke_damage_profile, effective_fonts, str(out_file)
             ))
 
         progress = None
@@ -717,7 +710,7 @@ def generate(count: int, dataset=None, seed: int = config.RANDOM_SEED,
                 item_rng,
                 item_np_rng,
                 edge_clipping=edge_clipping,
-                semi_broken_params=semi_broken_params,
+                stroke_damage_profile=stroke_damage_profile,
             )
             out_file = split_dirs[split] / file_name
             img.save(out_file)
@@ -859,8 +852,7 @@ def generate(count: int, dataset=None, seed: int = config.RANDOM_SEED,
                 counters=counters,
                 writer_assigner=writer_assigner,
                 edge_clipping=edge_clipping,
-                stroke_damage_params=_effective_stroke_damage_params(
-                    sample_mode, semi_broken_params),
+                stroke_damage_profile=stroke_damage_profile,
                 field_weights={
                     key: value for key, value in sorted(field_weights.items())
                     if value

@@ -282,12 +282,12 @@ class ProvenanceAndParityTests(unittest.TestCase):
         self.assertEqual(gui_meta["manifest_sha256"], cli_meta["manifest_sha256"])
 
         selection = gui_meta["effective_selection"]
-        self.assertIsNone(selection["stroke_damage_params"])
+        self.assertIsNone(gui_meta["stroke_damage_profile"])
         self.assertEqual(selection["field_weights"], field_weights_for_mode("regular"))
         self.assertEqual(selection["split_fractions"], [0.8, 0.1, 0.1])
         self.assertEqual(gui_meta["metadata_schema_version"], 1)
         semi_selection = semi_meta["effective_selection"]
-        self.assertEqual(semi_selection["stroke_damage_params"]["gap_prob"],
+        self.assertEqual(semi_meta["stroke_damage_profile"]["gap_probability"],
                          config.BROKEN_INK_GAP_PROB)
         self.assertNotIn("character", selection["field_weights"])
         self.assertIn("character", semi_selection["field_weights"])
