@@ -93,10 +93,10 @@ python gui.py
 Or on Windows, simply double-click `Generate Images.bat`.
 
 ### GUI Capabilities:
-- **Interactive Live Preview**: Preview handwriting fonts, text inputs, and degradation effects in real time with the `🎲 Re-roll` button.
-- **Presets**: Load any built-in or user preset and save the current studio settings as a user preset. Loading applies only the sections a preset contains. See [Presets](#presets).
+- **Generate tab**: run settings (count, seed, workers, names, sample mode, fonts, split ratios, field weights), a one-line recipe summary with **Open Studio**, preflight estimates (disk, ZIP, duration including expected retries), and progress.
+- **Studio tab**: the Developer Studio (see [Developer Studio guide](#developer-studio-guide)) with presets, every effect as a chance plus a range, and a faithful preview of the run.
+- **Datasets tab**: list, open, review montage and report, verify SHA-256, and delete datasets.
 - **Custom Field Weights & Split Ratios**: The field-weight grid follows the sample mode (and says so when it replaces your edits); you can then edit individual field types (`full_name`, `date_written`, `age`, etc.) and set exact Train / Val / Test percentages.
-- **Stroke damage** sliders only apply, and are only enabled, in the semi-broken sample modes.
 - **Preflight Estimates Card**: Calculates estimated disk space, ZIP archive size, and generation time before starting.
 
 ---
@@ -217,9 +217,91 @@ documented in [`resources/presets/README.md`](resources/presets/README.md).
 - Old flat presets (single-value sliders, no `schema_version`) still load; they
   are converted in memory, and saving always writes version 2.
 - Any preset file can be used on the command line with `--recipe`.
-- Duplicate, rename, delete, import, and export are available from Python
-  (`src.studio_recipe`: `duplicate_preset`, `rename_user_preset`,
-  `delete_user_preset`, `import_preset`, `export_preset`).
+- The Studio tab's preset bar can load, save, save as (choosing sections),
+  duplicate, rename, delete, import, and export presets, and copy the CLI
+  command for a saved preset. The same operations are available from Python
+  in `src.studio_recipe`.
+
+---
+
+## Developer Studio guide
+
+The **Studio** tab is where you design how images are degraded. Everything
+you set there is one *studio recipe*, so it behaves the same in the GUI, on the
+command line, and when a dataset is reproduced.
+
+### Workflow
+
+1. **Start from something close.** Pick a preset in the preset bar (built-ins
+   are marked 🔒) or choose a **Base profile**, which loads that built-in scan
+   profile's exact values.
+2. **Adjust effects.** Each effect has a **chance** (how often it is applied)
+   and a **range** (each image draws a value between min and max). Drag either
+   handle, use the arrow keys (Shift for ten steps, Tab to move from the min
+   to the max handle), or double-click / press Enter to type a value. Hover a
+   control for what it does. The groups are Ink and paper, Geometry, Scanner,
+   Stroke damage, and Character cutoff; each has a **Reset** back to what you
+   loaded, and **Reset studio** returns to the built-in defaults.
+3. **Check the preview.** The right-hand grid shows the *actual first samples*
+   of the run that the Generate tab would start: same fields, splits, writers,
+   seeds, fonts, and retries. Each tile names the file it will become (for
+   example `train/syn_000003.png`), its cut sides, and the attempt it was kept
+   on. Use the split filter to see the test split's held-out look, Next for
+   more samples, **Before / after** for the clean render next to the final
+   image, and **Bypass in preview** on any effect to compare with and without
+   it (bypasses are never saved or used by runs). If the seed on the Generate
+   tab is blank, the preview uses a temporary seed and says so.
+4. **Watch the retry estimate.** Under the grid, the studio reports how often
+   the quality check would reject a first attempt (edge ink, blank, low
+   contrast) and the mean attempts per sample; the duration estimate includes
+   it. Many retries usually mean an effect is too strong.
+5. **Save.** The current recipe shows a `*` while it differs from what you
+   loaded. **Save** updates a user preset; **Save as** creates one and lets you
+   choose its sections (include *Run settings* to also store the Generate tab's
+   sample mode, field mix, splits, and fonts).
+6. **Generate** from the Generate tab. The dataset records the effective recipe
+   in `studio-recipe.json` and which preset it came from.
+
+Stroke damage only applies in the semi-broken sample modes, so its sliders are
+disabled (with a note) in Regular mode.
+
+### Character cutoff
+
+Cuts are measured from the ink, not from the canvas, so letters are really
+clipped: a top cut of 10% removes the top tenth of the ink's height. The
+quick picks are None, Light (tips of tall letters), Moderate (loops and some
+word ends), and Heavy (ascenders, descenders and word ends). **Max ink loss**
+caps how much ink one cut may remove; bigger cuts are shrunk. Labels of 3 or
+fewer characters get no side cuts and only small vertical cuts, and side cuts
+on longer labels are capped at about a third of one character, so the image
+still matches its label. Every cut sample is listed in
+`cutoff-annotations.csv`, and dataset validation allows ink only at the sides
+that were cut.
+
+### Reproducing a dataset
+
+Every dataset contains `studio-recipe.json`. Re-running it with the same seed
+and count reproduces the dataset byte for byte, through the CLI or by
+importing it as a preset in the GUI:
+
+```bash
+python -m src.generate_synthetic --recipe dataset/datasets/dataset_001/studio-recipe.json --count 20000 --seed 42
+```
+
+**Copy CLI command** in the preset bar copies the equivalent command for a
+saved preset with the current count and seed.
+
+### Calibrating against real scans
+
+Put a representative sample of real crops in `dataset/real/images` and use
+**Compare with real scans** on the Studio tab. It compares 64 preview samples
+with 64 real scans and lists standardized differences in plain words (for
+example "synthetic is darker (-1.2 sd)"). Nudge the matching effects (fade and
+brightness for darkness, blur and noise for edges, paper tint and texture for
+tone) and compare again. These are descriptive statistics, not proof of
+realism; always check the review montage and a real, writer-held-out test set.
+For cutoff tuning, `python -m tools.cutoff_stats` reports attempts, the share
+of samples cut, and ink loss per cutoff profile.
 
 ---
 
