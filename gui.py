@@ -262,6 +262,11 @@ def preset_payload(display_name: str, slider_values: dict[str, float]) -> dict:
     return data
 
 
+def _split_percent(fraction: float) -> str:
+    """Display a split fraction as the percent text the split entries use."""
+    return f"{round(fraction * 100.0, 2):g}"
+
+
 def mode_field_weights(sample_mode: str) -> dict[str, int]:
     """Weights for every supported field type, 0 for types the mode skips."""
     weights = field_weights_for_mode(sample_mode)
@@ -359,9 +364,9 @@ class App(tk.Tk):
         self.preview_field_var = tk.StringVar(value="Auto (Sampled)")
         self.preview_degraded_var = tk.BooleanVar(value=True)
 
-        self.split_train_var = tk.StringVar(value=str(int(config.SYNTH_TRAIN_FRAC * 100)))
-        self.split_val_var = tk.StringVar(value=str(int(config.SYNTH_VAL_FRAC * 100)))
-        self.split_test_var = tk.StringVar(value=str(int(config.SYNTH_TEST_FRAC * 100)))
+        self.split_train_var = tk.StringVar(value=_split_percent(config.SYNTH_TRAIN_FRAC))
+        self.split_val_var = tk.StringVar(value=_split_percent(config.SYNTH_VAL_FRAC))
+        self.split_test_var = tk.StringVar(value=_split_percent(config.SYNTH_TEST_FRAC))
         self.field_weight_vars = {}
         self._field_weights_mode = config.DEFAULT_SAMPLE_MODE
         for ftype, weight in mode_field_weights(config.DEFAULT_SAMPLE_MODE).items():
@@ -906,7 +911,7 @@ class App(tk.Tk):
 
         self.reset_btn = ttk.Button(
             preset_frame, text="🔄 Reset", style="Secondary.TButton",
-            command=self._reset_developer_defaults)
+            command=self._reset_studio_sliders)
         self.reset_btn.pack(side="left")
         self._run_controls.append(self.reset_btn)
 
@@ -961,7 +966,7 @@ class App(tk.Tk):
         ttk.Separator(card_dev, orient="horizontal").pack(fill="x", pady=6)
         reset_bottom_btn = ttk.Button(
             card_dev, text="🔄 Reset All Controls to Default", style="Secondary.TButton",
-            command=self._reset_developer_defaults)
+            command=self._reset_all_controls)
         reset_bottom_btn.pack(fill="x", pady=(2, 2))
         self._run_controls.append(reset_bottom_btn)
 
@@ -1427,29 +1432,52 @@ class App(tk.Tk):
             return "none"
         return (top_p, bottom_p, left_p, right_p)
 
-    def _on_degradation_preset_change(self, _event=None):
-        preset_label = self.degradation_var.get()
-        preset_key = self.degradation_by_label.get(preset_label, "historical_scan_v1")
-        if preset_key in AUGMENTATION_PROFILES and hasattr(self, "dev_sliders"):
-            prof = AUGMENTATION_PROFILES[preset_key]
-            self._slider_updating = True
-            self.dev_sliders["fade"].set((prof.fade_range[0] + prof.fade_range[1]) / 2.0)
-            self.dev_sliders["tint"].set((prof.paper_tint_alpha_range[0] + prof.paper_tint_alpha_range[1]) / 2.0)
-            self.dev_sliders["stain"].set(prof.stain_probability)
-            self.dev_sliders["rotate"].set(prof.rotate_degrees)
-            self.dev_sliders["blur"].set((prof.blur_radius_range[0] + prof.blur_radius_range[1]) / 2.0)
-            self.dev_sliders["noise"].set((prof.noise_std_range[0] + prof.noise_std_range[1]) / 2.0)
-            self.dev_sliders["texture"].set((prof.paper_texture_std_range[0] + prof.paper_texture_std_range[1]) / 2.0)
-            self.dev_sliders["scanline"].set((prof.scanline_alpha_range[0] + prof.scanline_alpha_range[1]) / 2.0)
-            self.dev_sliders["jpeg"].set((prof.jpeg_quality_range[0] + prof.jpeg_quality_range[1]) / 2.0)
-            for k, var in self.dev_sliders.items():
-                if k.startswith("crop_"):
-                    continue
-                spec = SLIDER_SPECS[k]
-                v = snap_value(var.get(), spec.step, spec.low, spec.high)
-                var.set(v)
-                self.dev_labels[k].set(self._slider_text(k, v))
+    @staticmethod
+    def _profile_slider_values(profile_key: str) -> dict[str, float]:
+        """Degradation slider values for a registered profile (range midpoints).
+
+        Unregistered keys, such as the custom studio profile, give the
+        slider defaults.
+        """
+        prof = AUGMENTATION_PROFILES.get(profile_key)
+        if prof is None:
+            return {spec.name: spec.default for spec in DEGRADATION_SLIDER_SPECS}
+
+        def mid(values):
+            return (values[0] + values[1]) / 2.0
+
+        return {
+            "fade": mid(prof.fade_range),
+            "tint": mid(prof.paper_tint_alpha_range),
+            "stain": prof.stain_probability,
+            "rotate": prof.rotate_degrees,
+            "blur": mid(prof.blur_radius_range),
+            "noise": mid(prof.noise_std_range),
+            "texture": mid(prof.paper_texture_std_range),
+            "scanline": mid(prof.scanline_alpha_range),
+            "jpeg": mid(prof.jpeg_quality_range),
+        }
+
+    def _set_slider_values(self, values: dict[str, float]):
+        """Set sliders (snapped) and labels without triggering slider callbacks."""
+        self._slider_updating = True
+        try:
+            for name, raw in values.items():
+                spec = SLIDER_SPECS[name]
+                value = snap_value(raw, spec.step, spec.low, spec.high)
+                self.dev_sliders[name].set(value)
+                self.dev_labels[name].set(self._slider_text(name, value))
+        finally:
             self._slider_updating = False
+
+    def _selected_degradation_key(self) -> str:
+        return self.degradation_by_label.get(
+            self.degradation_var.get(), config.DEFAULT_DEGRADATION_PROFILE)
+
+    def _on_degradation_preset_change(self, _event=None):
+        preset_key = self._selected_degradation_key()
+        if preset_key in AUGMENTATION_PROFILES and hasattr(self, "dev_sliders"):
+            self._set_slider_values(self._profile_slider_values(preset_key))
         self._update_preview()
 
     def _on_clipping_preset_change(self, _event=None):
@@ -1476,13 +1504,27 @@ class App(tk.Tk):
                 self.degradation_var.set(config.DEGRADATION_PROFILES["custom_dev_v1"])
         self._update_preview()
 
-    def _reset_developer_defaults(self):
-        """Reset all controls and sliders back to standard defaults."""
-        self._slider_updating = True
+    def _reset_studio_sliders(self):
+        """Reset only the studio sliders.
 
+        Degradation sliders take the selected profile's values; crop and
+        stroke-damage sliders return to their defaults.
+        """
+        values = self._profile_slider_values(self._selected_degradation_key())
+        for spec in (*CROP_SLIDER_SPECS, *STROKE_SLIDER_SPECS):
+            values[spec.name] = spec.default
+        self._set_slider_values(values)
+        self._update_preview()
+
+    def _reset_all_controls(self):
+        """Reset every Generate-tab control, including weights and splits."""
         self.sample_mode_var.set(config.SAMPLE_MODES[config.DEFAULT_SAMPLE_MODE])
         self._sync_stroke_damage_state()
-        self._apply_mode_field_weights()
+        self._reset_field_weights()
+        self.split_train_var.set(_split_percent(config.SYNTH_TRAIN_FRAC))
+        self.split_val_var.set(_split_percent(config.SYNTH_VAL_FRAC))
+        self.split_test_var.set(_split_percent(config.SYNTH_TEST_FRAC))
+        self._update_split_sum_label()
         self.degradation_var.set(config.DEGRADATION_PROFILES[config.DEFAULT_DEGRADATION_PROFILE])
         self.edge_clipping_var.set(config.EDGE_CLIPPING_OPTIONS[config.DEFAULT_EDGE_CLIPPING])
         self.count_var.set(str(config.DEFAULT_COUNT))
@@ -1495,35 +1537,7 @@ class App(tk.Tk):
         self._on_font_style_change()
         self.real_var.set(False)
         self.zip_var.set(False)
-
-        defaults = {
-            "fade": 0.65,
-            "tint": 0.15,
-            "stain": 0.35,
-            "rotate": 4.5,
-            "blur": 0.0,
-            "noise": 12.0,
-            "texture": 3.5,
-            "scanline": 10.0,
-            "jpeg": 75.0,
-            "crop_top": 0.0,
-            "crop_bottom": 0.0,
-            "crop_left": 0.0,
-            "crop_right": 0.0,
-            "contrast": 0.80,
-            "gap_prob": 0.90,
-            "gap_count": 16.0,
-            "scratch": 0.70,
-            "erode": 0.55,
-        }
-
-        for name, def_val in defaults.items():
-            if hasattr(self, "dev_sliders") and name in self.dev_sliders:
-                self.dev_sliders[name].set(def_val)
-                self.dev_labels[name].set(self._slider_text(name, def_val))
-
-        self._slider_updating = False
-        self._update_preview()
+        self._reset_studio_sliders()
 
     def _update_preflight_estimates(self, _event=None):
         if not hasattr(self, "est_folder_lbl"):
