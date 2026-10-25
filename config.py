@@ -70,16 +70,17 @@ DEGRADATION_PROFILES = {
     "scan_noise": "Scan noise & scanner lines",
     "heavy_smudge": "Heavy smudge & ink damage",
     "clean": "Clean (minimal degradation)",
-    "custom_dev_v1": "Custom Developer Studio",
 }
 DEFAULT_DEGRADATION_PROFILE = "historical_scan_v1"
 
+# Character cutoff: real, ink-relative cuts (see src.generation_profiles
+# CUTOFF_PROFILES).  Keys are stable; labels describe what gets clipped.
 EDGE_CLIPPING_OPTIONS = {
-    "none": "None (0%)",
-    "light": "Light (1-2%)",
-    "moderate": "Moderate (3-5% loop tips)",
-    "heavy": "Heavy (6-9% ascenders/descenders)",
-    "custom": "Custom Crop Percentages",
+    "none": "None",
+    "light": "Light - tips of tall letters",
+    "moderate": "Moderate - loops and some word ends",
+    "heavy": "Heavy - ascenders, descenders and word ends",
+    "custom": "Custom",
 }
 DEFAULT_EDGE_CLIPPING = "none"
 

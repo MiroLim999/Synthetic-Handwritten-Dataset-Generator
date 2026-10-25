@@ -1,21 +1,148 @@
 {
+  "augmentation": {
+    "based_on": "clean",
+    "blur": {
+      "probability": 0.0,
+      "range": [
+        0.0,
+        0.0
+      ]
+    },
+    "brightness": {
+      "probability": 0.0,
+      "range": [
+        1.0,
+        1.0
+      ]
+    },
+    "fade": {
+      "probability": 0.0,
+      "range": [
+        1.0,
+        1.0
+      ]
+    },
+    "jpeg": {
+      "probability": 0.0,
+      "range": [
+        100,
+        100
+      ]
+    },
+    "noise": {
+      "probability": 0.0,
+      "range": [
+        0.0,
+        0.0
+      ]
+    },
+    "paper_texture": {
+      "probability": 0.0,
+      "range": [
+        0.0,
+        0.0
+      ]
+    },
+    "paper_tint": {
+      "probability": 0.0,
+      "range": [
+        0.0,
+        0.0
+      ]
+    },
+    "rotation": {
+      "probability": 0.0,
+      "range": [
+        0.0,
+        0.0
+      ]
+    },
+    "scanlines": {
+      "probability": 0.0,
+      "range": [
+        0,
+        0
+      ]
+    },
+    "stains": {
+      "count_range": [
+        2,
+        6
+      ],
+      "opacity_range": [
+        15,
+        45
+      ],
+      "probability": 0.0
+    }
+  },
+  "cutoff": {
+    "bottom": {
+      "probability": 0.0,
+      "range": [
+        0.0,
+        0.0
+      ]
+    },
+    "left": {
+      "probability": 0.0,
+      "range": [
+        0.0,
+        0.0
+      ]
+    },
+    "max_ink_loss": 0.15,
+    "right": {
+      "probability": 0.0,
+      "range": [
+        0.0,
+        0.0
+      ]
+    },
+    "top": {
+      "probability": 0.0,
+      "range": [
+        0.0,
+        0.0
+      ]
+    }
+  },
+  "description": "No degradation, no stroke damage and no cutoff: clean renders for debugging and baselines.",
+  "format": "synthetic-generator.studio-recipe",
   "name": "Clean Minimal",
-  "fade": 1.00,
-  "tint": 0.00,
-  "stain": 0.00,
-  "rotate": 0.0,
-  "blur": 0.0,
-  "noise": 0.0,
-  "texture": 0.0,
-  "scanline": 0.0,
-  "jpeg": 100.0,
-  "crop_top": 0,
-  "crop_bottom": 0,
-  "crop_left": 0,
-  "crop_right": 0,
-  "contrast": 1.00,
-  "gap_prob": 0.00,
-  "gap_count": 0.0,
-  "scratch": 0.00,
-  "erode": 0.00
+  "schema_version": 2,
+  "stroke_damage": {
+    "contrast": {
+      "probability": 0.0,
+      "range": [
+        0.35,
+        0.75
+      ]
+    },
+    "erode": {
+      "probability": 0.0,
+      "range": [
+        0.15,
+        0.45
+      ]
+    },
+    "gaps": {
+      "count_range": [
+        8,
+        24
+      ],
+      "probability": 0.0,
+      "size_range": [
+        3,
+        16
+      ]
+    },
+    "scratches": {
+      "count_range": [
+        1,
+        5
+      ],
+      "probability": 0.0
+    }
+  }
 }

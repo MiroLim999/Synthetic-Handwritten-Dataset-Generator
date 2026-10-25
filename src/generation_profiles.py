@@ -11,13 +11,27 @@ future calibration against representative scans.
 from __future__ import annotations
 
 import hashlib
+import json
 import math
 import random
-from dataclasses import asdict, dataclass
+import warnings
+from collections.abc import Mapping
+from dataclasses import asdict, dataclass, replace
 from numbers import Integral, Real
+
+from src import studio_spec
 
 
 PROFILE_SCHEMA_VERSION = 1
+# Shape version of AugmentationProfile metadata.  Kept separate from
+# PROFILE_SCHEMA_VERSION, which seeds writer styles and must never change.
+AUGMENTATION_SCHEMA_VERSION = 2
+STROKE_DAMAGE_SCHEMA_VERSION = 1
+# Length-aware safeguard for short labels (age, sex, single characters).
+SHORT_LABEL_CHARS = 3
+SHORT_LABEL_MAX_ERODE_PROBABILITY = 0.35
+# Attempts after this number progressively soften stochastic damage.
+DAMAGE_BACKOFF_AFTER_ATTEMPT = 8
 DEFAULT_WRITER_PROFILE_ID = "writer_style_v1"
 DEFAULT_AUGMENTATION_PROFILE_ID = "historical_scan_v1"
 
@@ -201,6 +215,11 @@ class AugmentationProfile:
     scanline_alpha_range: tuple[int, int]
     compression_probability: float
     jpeg_quality_range: tuple[int, int]
+    # Fields added in augmentation schema 2.  Their defaults reproduce the
+    # schema-1 behavior and RNG draws exactly.
+    rotate_min_degrees: float = 0.0
+    stain_count_range: tuple[int, int] = (2, 6)
+    stain_opacity_range: tuple[int, int] = (15, 45)
 
     def __post_init__(self) -> None:
         if not self.profile_id:
@@ -219,19 +238,186 @@ class AugmentationProfile:
         rotate = _finite("rotate_degrees", self.rotate_degrees)
         if rotate < 0:
             raise ValueError("rotate_degrees must be nonnegative")
+        rotate_min = _finite("rotate_min_degrees", self.rotate_min_degrees)
+        if not 0 <= rotate_min <= rotate:
+            raise ValueError(
+                "rotate_min_degrees must be between 0 and rotate_degrees")
         _range("blur_radius_range", self.blur_radius_range, minimum=0)
         _range("noise_std_range", self.noise_std_range, minimum=0)
         _range("paper_texture_std_range", self.paper_texture_std_range, minimum=0)
         for name, value, low, high in (
                 ("scanline_alpha_range", self.scanline_alpha_range, 0, 255),
-                ("jpeg_quality_range", self.jpeg_quality_range, 1, 100)):
+                ("jpeg_quality_range", self.jpeg_quality_range, 1, 100),
+                ("stain_count_range", self.stain_count_range, 0, 1000),
+                ("stain_opacity_range", self.stain_opacity_range, 0, 255)):
             _range(name, value, minimum=low, maximum=high)
             if any(not isinstance(item, Integral) or isinstance(item, bool)
                    for item in value):
                 raise ValueError(f"{name} values must be integers")
 
     def to_metadata(self) -> dict[str, object]:
-        return {"profile_schema_version": PROFILE_SCHEMA_VERSION, **asdict(self)}
+        return {
+            "profile_schema_version": PROFILE_SCHEMA_VERSION,
+            "augmentation_schema_version": AUGMENTATION_SCHEMA_VERSION,
+            **asdict(self),
+        }
+
+
+def _whole_range(name: str, value, *, minimum: int) -> tuple[int, int]:
+    _range(name, value, minimum=minimum)
+    if any(not isinstance(item, Integral) or isinstance(item, bool) for item in value):
+        raise ValueError(f"{name} values must be integers")
+    return int(value[0]), int(value[1])
+
+
+@dataclass(frozen=True)
+class StrokeDamageProfile:
+    """Localized stroke damage for semi-broken samples.
+
+    The defaults (:func:`stroke_damage_from_config`) reproduce the config
+    ``BROKEN_*`` behavior and RNG draws exactly.
+    """
+
+    contrast_probability: float
+    contrast_range: tuple[float, float]
+    erode_probability: float
+    erode_blend_range: tuple[float, float]
+    gap_probability: float
+    gap_count_range: tuple[int, int]
+    gap_size_range: tuple[int, int]
+    scratch_probability: float
+    scratch_count_range: tuple[int, int]
+
+    def __post_init__(self) -> None:
+        for name in ("contrast_probability", "erode_probability",
+                     "gap_probability", "scratch_probability"):
+            _probability(name, getattr(self, name))
+        low, _high = _range("contrast_range", self.contrast_range,
+                            minimum=0, maximum=1)
+        if low <= 0:
+            raise ValueError("contrast_range values must be greater than 0")
+        _range("erode_blend_range", self.erode_blend_range, minimum=0, maximum=1)
+        _whole_range("gap_count_range", self.gap_count_range, minimum=1)
+        _whole_range("gap_size_range", self.gap_size_range, minimum=1)
+        _whole_range("scratch_count_range", self.scratch_count_range, minimum=1)
+
+    @property
+    def profile_id(self) -> str:
+        return content_id("stroke", _stroke_values(asdict(self)))
+
+    def to_metadata(self) -> dict[str, object]:
+        return {
+            "stroke_damage_schema_version": STROKE_DAMAGE_SCHEMA_VERSION,
+            "profile_id": self.profile_id,
+            **asdict(self),
+        }
+
+    @classmethod
+    def from_legacy_params(cls, params: Mapping | None) -> "StrokeDamageProfile":
+        """Convert the old GUI dict (contrast_prob, gap_count, and so on).
+
+        ``gap_count: N`` becomes ``gap_count_range = (1, max(1, int(N)))``;
+        missing keys fall back to the config defaults, as the old
+        ``_semi_broken`` did.
+        """
+        base = stroke_damage_from_config()
+        params = dict(params or {})
+        unknown = sorted(set(params) - _LEGACY_STROKE_KEYS)
+        if unknown:
+            raise ValueError(f"Unknown stroke damage params: {', '.join(unknown)}")
+        changes: dict[str, object] = {}
+        for legacy, field in (("contrast_prob", "contrast_probability"),
+                              ("erode_prob", "erode_probability"),
+                              ("gap_prob", "gap_probability"),
+                              ("scratch_prob", "scratch_probability")):
+            if legacy in params:
+                changes[field] = float(params[legacy])
+        if params.get("gap_count") is not None:
+            changes["gap_count_range"] = (1, max(1, int(params["gap_count"])))
+        return replace(base, **changes)
+
+    def constrained_for_label(self, label: str, attempt: int) -> "StrokeDamageProfile":
+        """Apply the short-label safeguard and the late-attempt backoff.
+
+        Labels of 3 or fewer characters cap both ends of the gap-count range
+        at 3 x length and the erode chance at 0.35.  Attempts above 8 scale
+        the gap chance, erode chance, and gap-count range by
+        ``max(0.1, 1 - 0.1 * (attempt - 8))``, keeping at least one gap.
+        """
+        profile = self
+        length = len(label.strip())
+        if length <= SHORT_LABEL_CHARS:
+            cap = max(1, length * 3)
+            low, high = profile.gap_count_range
+            profile = replace(
+                profile,
+                gap_count_range=(min(low, cap), min(high, cap)),
+                erode_probability=min(profile.erode_probability,
+                                      SHORT_LABEL_MAX_ERODE_PROBABILITY),
+            )
+        if attempt > DAMAGE_BACKOFF_AFTER_ATTEMPT:
+            scale = max(0.1, 1.0 - ((attempt - DAMAGE_BACKOFF_AFTER_ATTEMPT) * 0.1))
+            low, high = profile.gap_count_range
+            profile = replace(
+                profile,
+                gap_probability=profile.gap_probability * scale,
+                erode_probability=profile.erode_probability * scale,
+                gap_count_range=(max(1, int(low * scale)), max(1, int(high * scale))),
+            )
+        return profile
+
+
+_LEGACY_STROKE_KEYS = frozenset({
+    "contrast_prob", "erode_prob", "gap_prob", "gap_count", "scratch_prob",
+})
+_STROKE_INTEGER_FIELDS = frozenset({
+    "gap_count_range", "gap_size_range", "scratch_count_range",
+})
+
+
+def _stroke_values(fields: Mapping[str, object]) -> dict[str, object]:
+    return {
+        name: _normalized_number(value, name in _STROKE_INTEGER_FIELDS)
+        for name, value in fields.items()
+    }
+
+
+def stroke_damage_from_config() -> StrokeDamageProfile:
+    """The config ``BROKEN_*`` values, read at call time."""
+    import config
+
+    return StrokeDamageProfile(
+        contrast_probability=config.BROKEN_CONTRAST_PROB,
+        contrast_range=tuple(config.BROKEN_CONTRAST_RANGE),
+        erode_probability=config.BROKEN_ERODE_PROB,
+        erode_blend_range=tuple(config.BROKEN_ERODE_BLEND),
+        gap_probability=config.BROKEN_INK_GAP_PROB,
+        gap_count_range=tuple(config.BROKEN_INK_GAP_COUNT),
+        gap_size_range=tuple(config.BROKEN_INK_GAP_SIZE),
+        scratch_probability=config.BROKEN_SCRATCH_PROB,
+        scratch_count_range=tuple(config.BROKEN_SCRATCH_COUNT),
+    )
+
+
+def as_stroke_damage_profile(value) -> StrokeDamageProfile:
+    """Accept a profile, a legacy params dict, or None (config defaults)."""
+    if isinstance(value, StrokeDamageProfile):
+        return value
+    if value is None:
+        return stroke_damage_from_config()
+    if isinstance(value, Mapping):
+        return StrokeDamageProfile.from_legacy_params(value)
+    raise TypeError(f"Unsupported stroke damage settings: {value!r}")
+
+
+def stroke_damage_from_spec(spec: Mapping) -> StrokeDamageProfile:
+    """Build a profile from a studio ``stroke_damage`` section."""
+    data = studio_spec.require_valid_section("stroke_damage", spec)
+    return StrokeDamageProfile(**studio_spec.section_fields("stroke_damage", data))
+
+
+def stroke_damage_spec_from_profile(profile: StrokeDamageProfile) -> dict:
+    return studio_spec.section_from_fields("stroke_damage", asdict(profile))
 
 
 WRITER_STYLE_PROFILES: dict[str, WriterStyleProfile] = {
@@ -469,7 +655,19 @@ def create_custom_augmentation_profile(
     jpeg_quality: int = 75,
     profile_id: str = "custom_dev_v1",
 ) -> AugmentationProfile:
-    """Dynamically construct a validated AugmentationProfile from developer UI controls."""
+    """Dynamically construct a validated AugmentationProfile from developer UI controls.
+
+    .. deprecated::
+        Use :func:`augmentation_spec_from_legacy_values` with
+        :func:`augmentation_profile_from_spec`, which give the same values
+        with a content-addressed profile ID.
+    """
+    warnings.warn(
+        "create_custom_augmentation_profile is deprecated; use "
+        "augmentation_profile_from_spec(augmentation_spec_from_legacy_values(...))",
+        DeprecationWarning,
+        stacklevel=2,
+    )
     fade_contrast = max(0.10, min(1.0, float(fade_contrast)))
     paper_tint_alpha = max(0.0, min(0.50, float(paper_tint_alpha)))
     stain_prob = max(0.0, min(1.0, float(stain_prob)))
@@ -502,6 +700,341 @@ def create_custom_augmentation_profile(
         compression_probability=1.0 if jpeg_quality < 100 else 0.0,
         jpeg_quality_range=(jpeg_quality, jpeg_quality),
     )
+
+
+_AUGMENTATION_INTEGER_FIELDS = frozenset({
+    "scanline_alpha_range", "jpeg_quality_range",
+    "stain_count_range", "stain_opacity_range",
+})
+
+
+def canonical_json(values: Mapping) -> str:
+    """Sorted, compact JSON used for content hashes."""
+    return json.dumps(values, sort_keys=True, separators=(",", ":"),
+                      ensure_ascii=True, allow_nan=False)
+
+
+def content_id(prefix: str, values: Mapping) -> str:
+    """``<prefix>_<first 12 hex of sha256(canonical JSON)>``."""
+    digest = hashlib.sha256(canonical_json(values).encode("utf-8")).hexdigest()
+    return f"{prefix}_{digest[:12]}"
+
+
+def _normalized_number(value, integer: bool):
+    if isinstance(value, (tuple, list)):
+        return [_normalized_number(item, integer) for item in value]
+    return int(value) if integer else float(value)
+
+
+def _augmentation_values(fields: Mapping[str, object]) -> dict[str, object]:
+    """Every profile value except the ID, with ints and floats normalized."""
+    return {
+        name: _normalized_number(value, name in _AUGMENTATION_INTEGER_FIELDS)
+        for name, value in fields.items()
+        if name != "profile_id"
+    }
+
+
+def _registered_augmentation_ids() -> dict[str, str]:
+    return {
+        canonical_json(_augmentation_values(asdict(profile))): profile_id
+        for profile_id, profile in AUGMENTATION_PROFILES.items()
+    }
+
+
+def augmentation_profile_id(fields: Mapping[str, object]) -> str:
+    """Registered ID when the values match a built-in, else a content ID."""
+    values = _augmentation_values(fields)
+    registered = _registered_augmentation_ids().get(canonical_json(values))
+    return registered or content_id("custom", values)
+
+
+def augmentation_profile_from_spec(spec: Mapping) -> AugmentationProfile:
+    """Build a profile from a studio ``augmentation`` section.
+
+    Missing params take the spec defaults; invalid or unknown values raise
+    ``ValueError``.  The ID is content-addressed (or a built-in's ID when the
+    values match it exactly).
+    """
+    data = studio_spec.require_valid_section("augmentation", spec)
+    fields = studio_spec.section_fields("augmentation", data)
+    return AugmentationProfile(profile_id=augmentation_profile_id(fields), **fields)
+
+
+def augmentation_spec_from_profile(
+        profile: str | AugmentationProfile) -> dict:
+    """The complete studio ``augmentation`` section for a profile."""
+    profile = get_augmentation_profile(profile)
+    return studio_spec.section_from_fields("augmentation", asdict(profile))
+
+
+def augmentation_spec_from_legacy_values(
+    *,
+    fade_contrast: float = 0.65,
+    paper_tint_alpha: float = 0.15,
+    stain_prob: float = 0.35,
+    rotate_deg: float = 4.5,
+    blur_radius: float = 0.8,
+    noise_std: float = 12.0,
+    paper_texture_std: float = 3.5,
+    scanline_alpha: int = 10,
+    jpeg_quality: int = 75,
+) -> dict:
+    """The ``augmentation`` section equivalent to the old single-value sliders.
+
+    Uses the same clamps and on/off rules as
+    :func:`create_custom_augmentation_profile`, so the resulting profile is
+    equal to it field for field (ID aside).
+    """
+    fade = max(0.10, min(1.0, float(fade_contrast)))
+    tint = max(0.0, min(0.50, float(paper_tint_alpha)))
+    stain = max(0.0, min(1.0, float(stain_prob)))
+    rotate = max(0.0, min(15.0, float(rotate_deg)))
+    blur = max(0.0, min(5.0, float(blur_radius)))
+    noise = max(0.0, min(50.0, float(noise_std)))
+    texture = max(0.0, min(20.0, float(paper_texture_std)))
+    scanline = max(0, min(60, int(scanline_alpha)))
+    jpeg = max(10, min(100, int(jpeg_quality)))
+    return {
+        "fade": {"probability": 1.0 if fade < 0.98 else 0.0, "range": [fade, fade]},
+        "brightness": {"probability": 0.0, "range": [1.0, 1.0]},
+        "paper_tint": {"probability": 1.0 if tint > 0 else 0.0, "range": [tint, tint]},
+        "stains": {"probability": stain, "count_range": [2, 6],
+                   "opacity_range": [15, 45]},
+        "rotation": {"probability": 1.0 if rotate > 0 else 0.0, "range": [0.0, rotate]},
+        "blur": {"probability": 1.0 if blur > 0 else 0.0, "range": [blur, blur]},
+        "noise": {"probability": 1.0 if noise > 0 else 0.0, "range": [noise, noise]},
+        "paper_texture": {"probability": 1.0 if texture > 0 else 0.0,
+                          "range": [texture, texture]},
+        "scanlines": {"probability": 1.0 if scanline > 0 else 0.0,
+                      "range": [scanline, scanline]},
+        "jpeg": {"probability": 1.0 if jpeg < 100 else 0.0, "range": [jpeg, jpeg]},
+    }
+
+
+CUTOFF_SCHEMA_VERSION = 1
+CUTOFF_METHOD = "ink_bbox_v1"
+CUTOFF_SIDE_NAMES = ("top", "bottom", "left", "right")
+
+
+@dataclass(frozen=True)
+class CutoffSide:
+    """Chance and fraction range for cutting one side of the ink box.
+
+    Fractions are of the ink box: its height for top/bottom, its width for
+    left/right.
+    """
+
+    probability: float = 0.0
+    fraction_range: tuple[float, float] = (0.0, 0.0)
+
+    def __post_init__(self) -> None:
+        _probability("probability", self.probability)
+        _, high = _range("fraction_range", self.fraction_range, minimum=0)
+        if high >= 1:
+            raise ValueError("fraction_range values must be below 1")
+
+    @property
+    def active(self) -> bool:
+        return self.probability > 0
+
+
+@dataclass(frozen=True)
+class CutoffProfile:
+    """Ink-relative character cutoff (method ``ink_bbox_v1``)."""
+
+    profile_id: str
+    top: CutoffSide = CutoffSide()
+    bottom: CutoffSide = CutoffSide()
+    left: CutoffSide = CutoffSide()
+    right: CutoffSide = CutoffSide()
+    max_ink_loss: float = 0.0
+    short_label_chars: int = 3
+    short_label_max_fraction: float = 0.10
+    # Left/right cuts are capped at this share of one average character
+    # (ink width / label length), so they clip a letter instead of removing
+    # it and the label still matches the image.
+    side_max_char_fraction: float = 0.35
+    method: str = CUTOFF_METHOD
+
+    def __post_init__(self) -> None:
+        if not self.profile_id:
+            raise ValueError("profile_id cannot be empty")
+        for name in CUTOFF_SIDE_NAMES:
+            if not isinstance(getattr(self, name), CutoffSide):
+                raise ValueError(f"{name} must be a CutoffSide")
+        loss = _finite("max_ink_loss", self.max_ink_loss)
+        if not 0 <= loss < 1:
+            raise ValueError("max_ink_loss must be in [0, 1)")
+        if (isinstance(self.short_label_chars, bool)
+                or not isinstance(self.short_label_chars, Integral)
+                or self.short_label_chars < 0):
+            raise ValueError("short_label_chars must be a nonnegative integer")
+        cap = _finite("short_label_max_fraction", self.short_label_max_fraction)
+        if not 0 <= cap < 1:
+            raise ValueError("short_label_max_fraction must be in [0, 1)")
+        side_cap = _finite("side_max_char_fraction", self.side_max_char_fraction)
+        if not 0 <= side_cap <= 1:
+            raise ValueError("side_max_char_fraction must be between 0 and 1")
+        if self.method != CUTOFF_METHOD:
+            raise ValueError(f"Unsupported cutoff method {self.method!r}")
+
+    def sides(self) -> tuple[tuple[str, CutoffSide], ...]:
+        return tuple((name, getattr(self, name)) for name in CUTOFF_SIDE_NAMES)
+
+    @property
+    def active(self) -> bool:
+        """Whether any side can be cut (only then is an ink mask built)."""
+        return any(side.active for _name, side in self.sides())
+
+    def constrained_for_label(self, label: str) -> "CutoffProfile":
+        """Adapt the cut to one label.
+
+        Short labels get no side cuts and capped vertical cuts.  Longer
+        labels keep their vertical cuts, and side cuts are capped at
+        ``side_max_char_fraction`` of one average character width.
+        """
+        length = len(label.strip())
+
+        def capped(side: CutoffSide, cap: float) -> CutoffSide:
+            low, high = side.fraction_range
+            if high <= cap:
+                return side
+            return replace(side, fraction_range=(min(low, cap), min(high, cap)))
+
+        if length <= self.short_label_chars:
+            cap = self.short_label_max_fraction
+            return replace(self, top=capped(self.top, cap),
+                           bottom=capped(self.bottom, cap),
+                           left=CutoffSide(), right=CutoffSide())
+        side_cap = self.side_max_char_fraction / length
+        return replace(self, left=capped(self.left, side_cap),
+                       right=capped(self.right, side_cap))
+
+    def to_metadata(self) -> dict[str, object]:
+        return {
+            "cutoff_schema_version": CUTOFF_SCHEMA_VERSION,
+            **asdict(self),
+        }
+
+
+def _cutoff_side(probability: float, low: float, high: float) -> CutoffSide:
+    return CutoffSide(probability, (low, high))
+
+
+CUTOFF_PROFILES: dict[str, CutoffProfile] = {
+    "none": CutoffProfile(profile_id="none"),
+    # Tuned in S3.9 with tools.cutoff_stats and the review montage.
+    "light": CutoffProfile(
+        profile_id="light",
+        top=_cutoff_side(0.50, 0.03, 0.07),
+        bottom=_cutoff_side(0.50, 0.03, 0.07),
+        max_ink_loss=0.08,
+    ),
+    "moderate": CutoffProfile(
+        profile_id="moderate",
+        top=_cutoff_side(0.55, 0.05, 0.11),
+        bottom=_cutoff_side(0.55, 0.05, 0.11),
+        left=_cutoff_side(0.15, 0.01, 0.04),
+        right=_cutoff_side(0.15, 0.01, 0.04),
+        max_ink_loss=0.12,
+    ),
+    "heavy": CutoffProfile(
+        profile_id="heavy",
+        top=_cutoff_side(0.65, 0.08, 0.16),
+        bottom=_cutoff_side(0.65, 0.08, 0.16),
+        left=_cutoff_side(0.30, 0.02, 0.06),
+        right=_cutoff_side(0.30, 0.02, 0.06),
+        max_ink_loss=0.18,
+    ),
+}
+
+
+def _cutoff_values(profile: CutoffProfile) -> dict[str, object]:
+    """Every profile value except the ID, with numbers normalized."""
+    values: dict[str, object] = {
+        name: {"probability": float(side.probability),
+               "fraction_range": [float(v) for v in side.fraction_range]}
+        for name, side in profile.sides()
+    }
+    values.update({
+        "max_ink_loss": float(profile.max_ink_loss),
+        "short_label_chars": int(profile.short_label_chars),
+        "short_label_max_fraction": float(profile.short_label_max_fraction),
+        "side_max_char_fraction": float(profile.side_max_char_fraction),
+        "method": profile.method,
+    })
+    return values
+
+
+def cutoff_profile_id(profile: CutoffProfile) -> str:
+    """Registered ID when the values match a built-in, else a content ID."""
+    values = _cutoff_values(profile)
+    for profile_id, registered in CUTOFF_PROFILES.items():
+        if _cutoff_values(registered) == values:
+            return profile_id
+    return content_id("cutoff", values)
+
+
+def _with_content_id(profile: CutoffProfile) -> CutoffProfile:
+    return replace(profile, profile_id=cutoff_profile_id(profile))
+
+
+def cutoff_profile_from_spec(spec: Mapping) -> CutoffProfile:
+    """Build a profile from a studio ``cutoff`` section."""
+    data = studio_spec.require_valid_section("cutoff", spec)
+    sides = {
+        name: CutoffSide(float(data[name]["probability"]),
+                         tuple(float(v) for v in data[name]["range"]))
+        for name in CUTOFF_SIDE_NAMES
+    }
+    return _with_content_id(CutoffProfile(
+        profile_id="pending", max_ink_loss=float(data["max_ink_loss"]), **sides))
+
+
+def cutoff_spec_from_profile(profile: str | CutoffProfile) -> dict:
+    """The complete studio ``cutoff`` section for a profile."""
+    profile = get_cutoff_profile(profile)
+    data: dict[str, object] = {
+        name: {"probability": float(side.probability),
+               "range": [float(v) for v in side.fraction_range]}
+        for name, side in profile.sides()
+    }
+    data["max_ink_loss"] = float(profile.max_ink_loss)
+    return data
+
+
+def get_cutoff_profile(profile: str | CutoffProfile = "none") -> CutoffProfile:
+    if isinstance(profile, CutoffProfile):
+        return profile
+    try:
+        return CUTOFF_PROFILES[profile]
+    except (KeyError, TypeError):
+        valid = ", ".join(CUTOFF_PROFILES)
+        raise ValueError(f"Unknown cutoff profile {profile!r}; choose {valid}") from None
+
+
+def as_cutoff_profile(value) -> CutoffProfile:
+    """Accept a profile, a registered ID, None, or a legacy 4-tuple.
+
+    A ``(top, bottom, left, right)`` tuple of fractions becomes a custom
+    profile that always cuts each nonzero side by exactly that fraction of
+    the ink box, with the spec's default ink-loss limit.
+    """
+    if value is None or value == "":
+        return CUTOFF_PROFILES["none"]
+    if isinstance(value, (tuple, list)):
+        if len(value) != 4:
+            raise ValueError("A cutoff tuple needs (top, bottom, left, right)")
+        sides = {}
+        for name, raw in zip(CUTOFF_SIDE_NAMES, value):
+            fraction = max(0.0, float(raw))
+            sides[name] = (CutoffSide(1.0, (fraction, fraction)) if fraction > 0
+                           else CutoffSide())
+        default_loss = studio_spec.PARAMS_BY_PATH["cutoff.max_ink_loss"].default
+        return _with_content_id(CutoffProfile(
+            profile_id="pending", max_ink_loss=float(default_loss), **sides))
+    return get_cutoff_profile(value)
 
 
 def _style_seed(seed: int, writer_id: str, profile_id: str) -> tuple[int, str]:

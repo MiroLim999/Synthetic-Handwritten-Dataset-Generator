@@ -7,12 +7,17 @@ randomly based on the probabilities in config.
 
 import io
 import random
+from dataclasses import dataclass
 
 import numpy as np
 from PIL import Image, ImageEnhance, ImageFilter, ImageDraw
 
 import config
-from src.generation_profiles import (AugmentationProfile,
+from src import cutoff as cutoff_engine
+from src.cutoff import NO_CUT, CutoffResult
+from src.generation_profiles import (AugmentationProfile, CutoffProfile,
+                                     StrokeDamageProfile, as_cutoff_profile,
+                                     as_stroke_damage_profile,
                                      get_augmentation_profile)
 
 
@@ -26,11 +31,26 @@ def _numpy_rng(np_rng):
     return np.random if np_rng is None else np_rng
 
 
-def _rotate(img: Image.Image, rng=None, degrees=None) -> Image.Image:
+def _draw_rotation_angle(rng=None, degrees=None, min_degrees: float = 0.0) -> float:
     rng = _python_rng(rng)
     degrees = config.AUG_ROTATE_DEGREES if degrees is None else degrees
-    angle = rng.uniform(-degrees, degrees)
+    if min_degrees > 0:
+        # Draw a magnitude in [min, max], then a sign.
+        angle = rng.uniform(min_degrees, degrees)
+        if rng.random() < 0.5:
+            angle = -angle
+        return angle
+    # The legacy single draw, kept so default output is byte-identical.
+    return rng.uniform(-degrees, degrees)
+
+
+def _rotate_by(img: Image.Image, angle: float) -> Image.Image:
     return img.rotate(angle, expand=True, fillcolor="white", resample=Image.BICUBIC)
+
+
+def _rotate(img: Image.Image, rng=None, degrees=None,
+            min_degrees: float = 0.0) -> Image.Image:
+    return _rotate_by(img, _draw_rotation_angle(rng, degrees, min_degrees))
 
 
 def _blur(img: Image.Image, rng=None, radius_range=None) -> Image.Image:
@@ -133,17 +153,18 @@ def _jpeg_roundtrip(img: Image.Image, rng=None,
         return encoded.convert("RGB").copy()
 
 
-def _stains(img: Image.Image, rng=None) -> Image.Image:
+def _stains(img: Image.Image, rng=None, count_range=(2, 6),
+            opacity_range=(15, 45)) -> Image.Image:
     """Add a few faint brownish blotches to mimic foxing / age spots."""
     rng = _python_rng(rng)
     img = img.convert("RGB")
     draw = ImageDraw.Draw(img, "RGBA")
     w, h = img.size
-    for _ in range(rng.randint(2, 6)):
+    for _ in range(rng.randint(*count_range)):
         cx, cy = rng.randint(0, w), rng.randint(0, h)
         r = rng.randint(3, max(4, h // 6))
         shade = rng.choice([(120, 90, 40), (150, 120, 70), (90, 70, 30)])
-        alpha = rng.randint(15, 45)
+        alpha = rng.randint(*opacity_range)
         draw.ellipse([cx - r, cy - r, cx + r, cy + r], fill=shade + (alpha,))
     return img
 
@@ -163,7 +184,8 @@ def _ink_bbox(img: Image.Image) -> tuple[int, int, int, int]:
     )
 
 
-def _ink_gaps(img: Image.Image, rng=None, max_gap_count=None) -> Image.Image:
+def _ink_gaps(img: Image.Image, rng=None, count_range=None,
+             size_range=None) -> Image.Image:
     """Erase tiny local pieces of strokes to mimic broken characters."""
     rng = _python_rng(rng)
     img = img.convert("RGB")
@@ -173,9 +195,9 @@ def _ink_gaps(img: Image.Image, rng=None, max_gap_count=None) -> Image.Image:
     if len(xs) == 0 or len(ys) == 0:
         return img
 
-    min_gap, max_gap = config.BROKEN_INK_GAP_SIZE
-    gap_count_range = config.BROKEN_INK_GAP_COUNT if max_gap_count is None else (1, max(1, int(max_gap_count)))
-    count = rng.randint(*gap_count_range) if isinstance(gap_count_range, tuple) else gap_count_range
+    min_gap, max_gap = config.BROKEN_INK_GAP_SIZE if size_range is None else size_range
+    count_range = config.BROKEN_INK_GAP_COUNT if count_range is None else count_range
+    count = rng.randint(*count_range)
     for _ in range(count):
         w = rng.randint(min_gap, max_gap)
         h = rng.randint(1, max(2, max_gap // 2))
@@ -192,14 +214,15 @@ def _ink_gaps(img: Image.Image, rng=None, max_gap_count=None) -> Image.Image:
     return img
 
 
-def _scratches(img: Image.Image, rng=None) -> Image.Image:
+def _scratches(img: Image.Image, rng=None, count_range=None) -> Image.Image:
     """Draw faint paper-colored scratches across parts of the text."""
     rng = _python_rng(rng)
+    count_range = config.BROKEN_SCRATCH_COUNT if count_range is None else count_range
     img = img.convert("RGB")
     draw = ImageDraw.Draw(img, "RGBA")
     w, h = img.size
     x0, y0, x1, y1 = _ink_bbox(img)
-    for _ in range(rng.randint(*config.BROKEN_SCRATCH_COUNT)):
+    for _ in range(rng.randint(*count_range)):
         length = rng.randint(max(8, w // 5), max(10, w))
         angle = rng.uniform(-0.35, 0.35)
         sx = rng.randint(0, max(0, w - 1))
@@ -212,87 +235,73 @@ def _scratches(img: Image.Image, rng=None) -> Image.Image:
     return img
 
 
-def _erode_ink(img: Image.Image, rng=None) -> Image.Image:
+def _erode_ink(img: Image.Image, rng=None, blend_range=None) -> Image.Image:
     """Lightly shrink dark strokes so some thin parts disappear."""
     rng = _python_rng(rng)
+    blend_range = config.BROKEN_ERODE_BLEND if blend_range is None else blend_range
     eroded = img.filter(ImageFilter.MaxFilter(3))
     return Image.blend(img.convert("RGB"), eroded.convert("RGB"),
-                       rng.uniform(*config.BROKEN_ERODE_BLEND))
+                       rng.uniform(*blend_range))
 
 
-def _broken_contrast(img: Image.Image, rng=None) -> Image.Image:
+def _broken_contrast(img: Image.Image, rng=None, factor_range=None) -> Image.Image:
     rng = _python_rng(rng)
-    factor = rng.uniform(*config.BROKEN_CONTRAST_RANGE)
+    factor_range = config.BROKEN_CONTRAST_RANGE if factor_range is None else factor_range
+    factor = rng.uniform(*factor_range)
     return ImageEnhance.Contrast(img).enhance(factor)
 
 
-def _semi_broken(img: Image.Image, rng=None, params: dict | None = None) -> Image.Image:
-    """Apply extra localized damage for semi-broken text samples."""
-    rng = _python_rng(rng)
-    params = params or {}
-    contrast_prob = params.get("contrast_prob", config.BROKEN_CONTRAST_PROB)
-    erode_prob = params.get("erode_prob", config.BROKEN_ERODE_PROB)
-    gap_prob = params.get("gap_prob", config.BROKEN_INK_GAP_PROB)
-    gap_count = params.get("gap_count", None)
-    scratch_prob = params.get("scratch_prob", config.BROKEN_SCRATCH_PROB)
+def _semi_broken(img: Image.Image, rng=None,
+                 profile: StrokeDamageProfile | dict | None = None) -> Image.Image:
+    """Apply extra localized damage for semi-broken text samples.
 
-    if rng.random() < contrast_prob:
-        img = _broken_contrast(img, rng=rng)
-    if rng.random() < erode_prob:
-        img = _erode_ink(img, rng=rng)
-    if rng.random() < gap_prob:
-        img = _ink_gaps(img, rng=rng, max_gap_count=gap_count)
-    if rng.random() < scratch_prob:
-        img = _scratches(img, rng=rng)
+    ``profile`` may be a :class:`StrokeDamageProfile`, a legacy params dict,
+    or None for the config defaults; all three make the same RNG calls in
+    the same order.
+    """
+    rng = _python_rng(rng)
+    profile = as_stroke_damage_profile(profile)
+    if rng.random() < profile.contrast_probability:
+        img = _broken_contrast(img, rng=rng, factor_range=profile.contrast_range)
+    if rng.random() < profile.erode_probability:
+        img = _erode_ink(img, rng=rng, blend_range=profile.erode_blend_range)
+    if rng.random() < profile.gap_probability:
+        img = _ink_gaps(img, rng=rng, count_range=profile.gap_count_range,
+                        size_range=profile.gap_size_range)
+    if rng.random() < profile.scratch_probability:
+        img = _scratches(img, rng=rng, count_range=profile.scratch_count_range)
     return img
 
 
-EDGE_CLIPPING_RANGES: dict[str, tuple[float, float]] = {
-    "none": (0.00, 0.00),
-    "light": (0.01, 0.02),
-    "moderate": (0.03, 0.05),
-    "heavy": (0.06, 0.09),
-}
+@dataclass(frozen=True)
+class DegradeResult:
+    """The degraded image and the character cut applied to it."""
 
-
-def _clip_edges(img: Image.Image, level: str | tuple[float, float, float, float] = "none", rng=None) -> Image.Image:
-    """Crop edges of the image to mimic tight boundary cuts on handwriting."""
-    rng = _python_rng(rng)
-    if isinstance(level, tuple) and len(level) == 4:
-        top_p, bottom_p, left_p, right_p = (max(0.0, float(v)) for v in level)
-        w, h = img.size
-        top_crop = int(round(h * top_p))
-        bottom_crop = int(round(h * bottom_p))
-        left_crop = int(round(w * left_p))
-        right_crop = int(round(w * right_p))
-    else:
-        frac_range = EDGE_CLIPPING_RANGES.get(str(level), (0.0, 0.0))
-        if frac_range[1] <= 0:
-            return img
-
-        w, h = img.size
-        top_crop = int(round(h * rng.uniform(*frac_range)))
-        bottom_crop = int(round(h * rng.uniform(*frac_range)))
-        left_crop = int(round(w * rng.uniform(*frac_range)))
-        right_crop = int(round(w * rng.uniform(*frac_range)))
-
-    if top_crop <= 0 and bottom_crop <= 0 and left_crop <= 0 and right_crop <= 0:
-        return img
-
-    left = min(left_crop, max(0, w - 10))
-    top = min(top_crop, max(0, h - 10))
-    right = max(left + 10, w - right_crop)
-    bottom = max(top + 10, h - bottom_crop)
-
-    return img.crop((left, top, right, bottom))
+    image: Image.Image
+    cutoff: CutoffResult = NO_CUT
 
 
 def degrade(img: Image.Image, damage_profile: str = "regular",
             rng=None, np_rng=None,
             augmentation_profile: str | AugmentationProfile | None = None,
-            edge_clipping: str | tuple[float, float, float, float] = "none",
-            semi_broken_params: dict | None = None,
+            edge_clipping: str | CutoffProfile | tuple | None = "none",
+            semi_broken_params: StrokeDamageProfile | dict | None = None,
             ) -> Image.Image:
+    """Apply the full random augmentation chain and return only the image."""
+    return degrade_detailed(
+        img, damage_profile, rng=rng, np_rng=np_rng,
+        augmentation_profile=augmentation_profile,
+        edge_clipping=edge_clipping,
+        semi_broken_params=semi_broken_params,
+    ).image
+
+
+def degrade_detailed(img: Image.Image, damage_profile: str = "regular",
+                     rng=None, np_rng=None,
+                     augmentation_profile: str | AugmentationProfile | None = None,
+                     edge_clipping: str | CutoffProfile | tuple | None = "none",
+                     semi_broken_params: StrokeDamageProfile | dict | None = None,
+                     ) -> DegradeResult:
     """Apply the full random augmentation chain.
 
     ``augmentation_profile=None`` preserves the mutable configuration-driven
@@ -300,9 +309,15 @@ def degrade(img: Image.Image, damage_profile: str = "regular",
     :class:`AugmentationProfile` freezes all regular augmentation parameters
     and enables its versioned paper-texture, scan-line, and compression steps.
     Every stochastic operation uses the supplied Python/NumPy RNGs.
+
+    ``edge_clipping`` selects a character cutoff (registered ID, profile, or
+    legacy 4-tuple).  The ink mask is built from the clean render only when
+    some side can be cut, so cutoff ``none`` makes no extra draws.
     """
     rng = _python_rng(rng)
     np_rng = _numpy_rng(np_rng)
+    cutoff_profile = as_cutoff_profile(edge_clipping)
+    mask = cutoff_engine.ink_mask(img) if cutoff_profile.active else None
     profile = (
         None if augmentation_profile is None
         else get_augmentation_profile(augmentation_profile)
@@ -357,16 +372,24 @@ def degrade(img: Image.Image, damage_profile: str = "regular",
             ),
         )
     if rng.random() < stain_probability:
-        img = _stains(img, rng=rng)
-    if damage_profile.startswith("semi_broken") or semi_broken_params:
-        img = _semi_broken(img, rng=rng, params=semi_broken_params)
+        if profile is None:
+            img = _stains(img, rng=rng)
+        else:
+            img = _stains(img, rng=rng, count_range=profile.stain_count_range,
+                          opacity_range=profile.stain_opacity_range)
+    # Params only tune semi-broken damage; they never switch it on.
+    if damage_profile.startswith("semi_broken"):
+        img = _semi_broken(img, rng=rng, profile=semi_broken_params)
     if rng.random() < rotate_probability:
-        img = _rotate(
-            img,
-            rng=rng,
+        angle = _draw_rotation_angle(
+            rng,
             degrees=(config.AUG_ROTATE_DEGREES if profile is None
                      else profile.rotate_degrees),
+            min_degrees=0.0 if profile is None else profile.rotate_min_degrees,
         )
+        img = _rotate_by(img, angle)
+        if mask is not None:
+            mask = cutoff_engine.rotate_mask(mask, angle)
     if rng.random() < blur_probability:
         img = _blur(
             img,
@@ -398,6 +421,7 @@ def degrade(img: Image.Image, damage_profile: str = "regular",
             img = _jpeg_roundtrip(
                 img, rng=rng, quality_range=profile.jpeg_quality_range
             )
-    if edge_clipping and edge_clipping != "none":
-        img = _clip_edges(img, level=edge_clipping, rng=rng)
-    return img
+    result = NO_CUT
+    if mask is not None:
+        img, result = cutoff_engine.apply_cut(img, mask, cutoff_profile, rng)
+    return DegradeResult(img, result)

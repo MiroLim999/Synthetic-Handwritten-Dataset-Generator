@@ -1,21 +1,148 @@
 {
+  "augmentation": {
+    "based_on": "historical_1914_ledger",
+    "blur": {
+      "probability": 0.55,
+      "range": [
+        0.4,
+        1.4
+      ]
+    },
+    "brightness": {
+      "probability": 0.75,
+      "range": [
+        0.7,
+        1.15
+      ]
+    },
+    "fade": {
+      "probability": 0.85,
+      "range": [
+        0.4,
+        0.7
+      ]
+    },
+    "jpeg": {
+      "probability": 0.35,
+      "range": [
+        60,
+        85
+      ]
+    },
+    "noise": {
+      "probability": 0.6,
+      "range": [
+        4.0,
+        18.0
+      ]
+    },
+    "paper_texture": {
+      "probability": 0.8,
+      "range": [
+        2.5,
+        7.0
+      ]
+    },
+    "paper_tint": {
+      "probability": 0.9,
+      "range": [
+        0.12,
+        0.25
+      ]
+    },
+    "rotation": {
+      "probability": 0.85,
+      "range": [
+        0.0,
+        3.5
+      ]
+    },
+    "scanlines": {
+      "probability": 0.2,
+      "range": [
+        4,
+        14
+      ]
+    },
+    "stains": {
+      "count_range": [
+        2,
+        6
+      ],
+      "opacity_range": [
+        15,
+        45
+      ],
+      "probability": 0.45
+    }
+  },
+  "cutoff": {
+    "bottom": {
+      "probability": 0.0,
+      "range": [
+        0.0,
+        0.0
+      ]
+    },
+    "left": {
+      "probability": 0.0,
+      "range": [
+        0.0,
+        0.0
+      ]
+    },
+    "max_ink_loss": 0.15,
+    "right": {
+      "probability": 0.0,
+      "range": [
+        0.0,
+        0.0
+      ]
+    },
+    "top": {
+      "probability": 0.0,
+      "range": [
+        0.0,
+        0.0
+      ]
+    }
+  },
+  "description": "The historical_1914_ledger scan profile: heavy tint and fading on textured paper, moderate stroke damage, no cutoff.",
+  "format": "synthetic-generator.studio-recipe",
   "name": "1914 Historical Book Record",
-  "fade": 0.58,
-  "tint": 0.22,
-  "stain": 0.45,
-  "rotate": 3.5,
-  "blur": 0.6,
-  "noise": 16.0,
-  "texture": 4.5,
-  "scanline": 10.0,
-  "jpeg": 70.0,
-  "crop_top": 0,
-  "crop_bottom": 0,
-  "crop_left": 0,
-  "crop_right": 0,
-  "contrast": 0.72,
-  "gap_prob": 0.85,
-  "gap_count": 16.0,
-  "scratch": 0.60,
-  "erode": 0.50
+  "schema_version": 2,
+  "stroke_damage": {
+    "contrast": {
+      "probability": 0.72,
+      "range": [
+        0.35,
+        0.75
+      ]
+    },
+    "erode": {
+      "probability": 0.5,
+      "range": [
+        0.15,
+        0.45
+      ]
+    },
+    "gaps": {
+      "count_range": [
+        8,
+        16
+      ],
+      "probability": 0.85,
+      "size_range": [
+        3,
+        16
+      ]
+    },
+    "scratches": {
+      "count_range": [
+        1,
+        5
+      ],
+      "probability": 0.6
+    }
+  }
 }

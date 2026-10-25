@@ -56,6 +56,29 @@ class DatasetValidationTests(unittest.TestCase):
             writer.writeheader()
             writer.writerows(self.rows)
 
+    def test_cutoff_sidecar_allows_ink_only_at_recorded_sides(self):
+        image = Image.new("RGB", (100, 40), "white")
+        ImageDraw.Draw(image).rectangle((15, 0, 85, 24), fill="black")
+        image.save(self.root / "train" / "syn_000001.png")
+        report = validate_dataset(self.root, write_artifacts=False)
+        self.assertTrue(any("image edge" in error for error in report.errors))
+
+        sidecar = self.root / "cutoff-annotations.csv"
+        header = "filename,split,cut_top,cut_bottom,cut_left,cut_right,ink_loss\n"
+        sidecar.write_text(
+            header + "syn_000001.png,train,0.1000,0.0000,0.0000,0.0000,0.0500\n",
+            encoding="utf-8")
+        report = validate_dataset(self.root, write_artifacts=True)
+        self.assertTrue(report.valid, report.errors)
+        self.assertEqual(report.statistics["cutoff"]["by_side"]["top"], 1)
+        self.assertTrue((self.root / MONTAGE_FILENAME).is_file())
+
+        sidecar.write_text(
+            header + "syn_000001.png,train,0.0000,0.1000,0.0000,0.0000,0.0500\n",
+            encoding="utf-8")
+        report = validate_dataset(self.root, write_artifacts=False)
+        self.assertTrue(any("image edge" in error for error in report.errors))
+
     def test_valid_dataset_writes_report_and_montage(self):
         report = validate_dataset(self.root, expected_count=3)
         self.assertTrue(report.valid, report.errors)

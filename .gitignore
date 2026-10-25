@@ -22,3 +22,9 @@ htmlcov/
 .venv/
 venv/
 .DS_Store
+
+# local GUI logs
+logs/
+
+# user studio presets (local, not shared)
+resources/presets/user/

@@ -23,10 +23,13 @@ Usage:
   python -m src.generate_synthetic --count 5000 --dataset 2
   python -m src.generate_synthetic --count 200 --dataset my_test_run
   python -m src.generate_synthetic --count 2000 --mode semi_broken_mixed
+  python -m src.generate_synthetic --count 500 --recipe resources/presets/historical_faded.json
+  python -m src.generate_synthetic --recipe my.json --cutoff heavy --print-recipe
 """
 
 import argparse
 import concurrent.futures
+import contextlib
 import csv
 import hashlib
 import json
@@ -38,6 +41,7 @@ import tempfile
 import uuid
 import zipfile
 from collections import Counter
+from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
@@ -45,9 +49,10 @@ from tqdm import tqdm
 
 import config
 from src import fields
-from src.augment import degrade
-from src.dataset_validation import (REPORT_FILENAME, assess_image_quality,
-                                    validate_dataset, MONTAGE_FILENAME)
+from src.cutoff import (CUTOFF_ANNOTATION_COLUMNS, CUTOFF_ANNOTATIONS_FILENAME,
+                        annotation_row)
+from src.dataset_validation import (REPORT_FILENAME, validate_dataset,
+                                    MONTAGE_FILENAME)
 from src.dataset_mutation import (assert_no_sibling_archive,
                                   dataset_mutation_lock)
 from src.handoff_validation import (validate_handoff_bytes,
@@ -57,14 +62,30 @@ from src.image_preprocessing import (PREPROCESSING_ID, TROCR_IMAGE_SIZE,
 from src.image_statistics import (compare_image_statistics, iter_image_paths,
                                   summarize_image_statistics)
 from src.generation_io import (AtomicCsvWriter, GenerationCounters,
-                               SyntheticWriterAssigner, iter_generation_plan,
-                               verify_sha256_sidecar, write_sha256_sidecar)
-from src.generation_profiles import (DEFAULT_AUGMENTATION_PROFILE_ID,
+                               SyntheticWriterAssigner, verify_sha256_sidecar, write_sha256_sidecar)
+from src.generation_profiles import (AUGMENTATION_PROFILES, CUTOFF_PROFILES,
+                                     DEFAULT_AUGMENTATION_PROFILE_ID,
                                      DEFAULT_WRITER_PROFILE_ID,
+                                     AugmentationProfile,
+                                     CutoffProfile,
+                                     StrokeDamageProfile,
+                                     as_cutoff_profile,
+                                     as_stroke_damage_profile,
+                                     augmentation_profile_from_spec,
+                                     augmentation_spec_from_profile,
+                                     cutoff_profile_from_spec,
+                                     cutoff_spec_from_profile,
                                      get_augmentation_profile,
                                      get_writer_style_profile,
+                                     stroke_damage_from_config,
+                                     stroke_damage_from_spec,
+                                     stroke_damage_spec_from_profile,
+                                     WriterStyleProfile,
                                      writer_style_for)
 from src.generation_resources import preflight_generation_resources
+from src.studio_recipe import (RECIPE_FILENAME, RecipeError, StudioRecipe,
+                               compose_settings, load_recipe, parse_recipe,
+                               save_recipe, validate_run)
 from src.manifest import (MANIFEST_COLUMNS, MANIFEST_SCHEMA_VERSION,
                           RUN_METADATA_FILENAME)
 from src.path_safety import is_reparse_point, snapshot_regular_tree
@@ -72,8 +93,11 @@ from src.provenance import (atomic_write_json, configuration_snapshot,
                             git_is_dirty, git_revision, installed_versions,
                             resource_hashes, sha256_file, source_hashes,
                             utc_now_iso)
-from src.render import (CURSIVE_STYLE_GROUPS, FONT_STYLES, FONT_STYLE_ALL,
-                        font_path_for, fonts_for_style, render_text)
+from src.render import (CURSIVE_STYLE_GROUPS, FONT_STYLES,
+                        font_path_for, fonts_for_style)
+from src.sample_pipeline import (MAX_SAMPLE_ATTEMPTS,  # noqa: F401
+                                 generate_valid_sample, item_seed_for,
+                                 iter_run_plan)
 from src.split_policy import (EVALUATION_ANNOTATION_COLUMNS,
                               build_synthetic_evaluation_policy)
 
@@ -81,10 +105,10 @@ from src.split_policy import (EVALUATION_ANNOTATION_COLUMNS,
 EVALUATION_ANNOTATIONS_FILENAME = "evaluation-annotations.csv"
 IMAGE_STATISTICS_FILENAME = "image-statistics.json"
 STATISTICS_SAMPLE_LIMIT = 512
-MAX_SAMPLE_ATTEMPTS = 20
 GENERATOR_SOURCE_FILES = (
     "config.py",
     "src/augment.py",
+    "src/cutoff.py",
     "src/dataset_validation.py",
     "src/fields.py",
     "src/generation_io.py",
@@ -96,11 +120,28 @@ GENERATOR_SOURCE_FILES = (
     "src/manifest.py",
     "src/provenance.py",
     "src/render.py",
+    "src/sample_pipeline.py",
     "src/split_policy.py",
+    "src/studio_recipe.py",
+    "src/studio_spec.py",
 )
 FORMAT_SOURCE_COLUMNS = (
     "filename", "field_type", "format_profile", "format_id",
 )
+
+
+AUGMENTATION_PROFILE_IDS = frozenset(AUGMENTATION_PROFILES)
+CUTOFF_PROFILE_IDS = frozenset(CUTOFF_PROFILES)
+
+
+class _FromRecipe:
+    """Default for generate() options that come from the recipe (or defaults)."""
+
+    def __repr__(self) -> str:
+        return "<from recipe or default>"
+
+
+FROM_RECIPE = _FromRecipe()
 
 
 class GenerationCancelled(RuntimeError):
@@ -194,6 +235,19 @@ def _preflight_generation(count: int, names_version: str | None,
     return sample_mode, names_dir
 
 
+def effective_fonts_for(font_style: str, cursive_group: str,
+                        specific_font: str) -> tuple[str, ...]:
+    """The font files a run renders with."""
+    fonts = (
+        (font_path_for(specific_font),)
+        if specific_font
+        else fonts_for_style(font_style, cursive_group)
+    )
+    if not all(fonts):
+        raise ValueError("The effective font selection contains an unavailable font")
+    return tuple(str(font) for font in fonts)
+
+
 def _normalize_sample_mode(sample_mode: str | None) -> str:
     """Return a valid sample mode, falling back to the configured default."""
     sample_mode = sample_mode or config.DEFAULT_SAMPLE_MODE
@@ -203,7 +257,7 @@ def _normalize_sample_mode(sample_mode: str | None) -> str:
     return sample_mode
 
 
-def _field_weights_for_mode(sample_mode: str) -> dict[str, int]:
+def field_weights_for_mode(sample_mode: str) -> dict[str, int]:
     """Field mix for regular and semi-broken generation modes."""
     if sample_mode == "regular":
         return dict(config.FIELD_WEIGHTS)
@@ -234,10 +288,13 @@ def _field_weights_for_mode(sample_mode: str) -> dict[str, int]:
     raise AssertionError(f"Unhandled sample mode: {sample_mode}")
 
 
+_field_weights_for_mode = field_weights_for_mode
+
+
 def _weighted_field_types(n: int, sample_mode: str, rng=None) -> list[str]:
     """Build a list of n field-type choices following the selected mode."""
     rng = random if rng is None else rng
-    mode_weights = _field_weights_for_mode(sample_mode)
+    mode_weights = field_weights_for_mode(sample_mode)
     types = list(mode_weights.keys())
     weights = list(mode_weights.values())
     return rng.choices(types, weights=weights, k=n)
@@ -267,93 +324,34 @@ def _generate_valid_sample(field_type: str, split: str, file_name: str,
                            rng: random.Random,
                            np_rng: np.random.Generator,
                            edge_clipping: str = "none",
-                           semi_broken_params: dict | None = None):
+                           stroke_damage_profile: StrokeDamageProfile | None = None):
     """Generate one quality-checked crop, retrying stochastic failures."""
     damage_profile = (
         "semi_broken" if sample_mode.startswith("semi_broken") else "regular"
     )
-    failures = []
-    for attempt in range(1, MAX_SAMPLE_ATTEMPTS + 1):
-        format_profile = evaluation_policy.format_profile_for_field(
-            split, field_type
-        )
-        label, format_id = fields.make_value_with_format(
-            field_type,
-            rng=rng,
-            names_dir=names_dir,
-            format_profile=format_profile,
-        )
-        image, font_used = render_text(
-            label,
-            font_style=font_style,
-            cursive_group=cursive_group,
-            specific_font="",
-            rng=rng,
-            writer_style=writer_style,
-            font_pool=evaluation_policy.fonts_for_split(split),
-        )
-        current_semi_params = dict(semi_broken_params) if semi_broken_params else {}
-        current_aug_profile = augmentation_profile
-
-        # Length-aware safeguard for short labels (1-3 chars) like age, sex, character
-        if len(label.strip()) <= 3:
-            max_gaps = max(1, len(label.strip()) * 3)
-            if "gap_count" in current_semi_params:
-                current_semi_params["gap_count"] = min(current_semi_params["gap_count"], max_gaps)
-            if "erode_prob" in current_semi_params:
-                current_semi_params["erode_prob"] = min(current_semi_params.get("erode_prob", 0.5), 0.35)
-
-        # Progressive attempt backoff if stochastic damage wipes out a crop
-        if attempt > 8 and current_semi_params:
-            scale = max(0.1, 1.0 - ((attempt - 8) * 0.1))
-            if "gap_count" in current_semi_params:
-                current_semi_params["gap_count"] = max(1, int(current_semi_params["gap_count"] * scale))
-            if "erode_prob" in current_semi_params:
-                current_semi_params["erode_prob"] = current_semi_params["erode_prob"] * scale
-            if "gap_prob" in current_semi_params:
-                current_semi_params["gap_prob"] = current_semi_params["gap_prob"] * scale
-
-        # Fail-safe recovery for extreme attempts (>15): use safe parameters so massive jobs never crash
-        if attempt > 15:
-            current_damage_profile = "regular"
-            current_semi_params = None
-            current_edge_clipping = "none"
-        else:
-            current_damage_profile = damage_profile
-            current_edge_clipping = edge_clipping
-
-        image = degrade(
-            image,
-            damage_profile=current_damage_profile,
-            rng=rng,
-            np_rng=np_rng,
-            augmentation_profile=current_aug_profile,
-            edge_clipping=current_edge_clipping,
-            semi_broken_params=current_semi_params if current_semi_params else None,
-        )
-        image = evaluation_policy.apply_degradation_holdout(
-            image, split, sample_key=file_name
-        )
-        _statistics, errors, _warnings = assess_image_quality(image)
-        if not errors:
-            return label, image, font_used, format_profile, format_id
-        failures = errors
-    detail = "; ".join(failures) or "unknown image-quality failure"
-    raise ValueError(
-        f"Could not produce a valid {field_type!r} sample after "
-        f"{MAX_SAMPLE_ATTEMPTS} attempts: {detail}"
+    if damage_profile == "semi_broken" and stroke_damage_profile is None:
+        stroke_damage_profile = stroke_damage_from_config()
+    result = generate_valid_sample(
+        field_type=field_type, split=split, file_name=file_name,
+        names_dir=names_dir, font_style=font_style, cursive_group=cursive_group,
+        evaluation_policy=evaluation_policy, writer_style=writer_style,
+        augmentation_profile=augmentation_profile, rng=rng, np_rng=np_rng,
+        damage_profile=damage_profile, stroke_damage_profile=stroke_damage_profile,
+        cutoff_profile=as_cutoff_profile(edge_clipping),
     )
+    return (result.label, result.image, result.font, result.format_profile,
+            result.format_id, result.cutoff)
 
 
 def _process_one_worker_task(task_args):
     (i, field_type, split, file_name, names_dir_str, sample_mode,
      font_style, cursive_group, synthetic_writer_id, seed,
      writer_profile, augmentation_profile, edge_clipping,
-     semi_broken_params, effective_fonts, out_file_str) = task_args
+     stroke_damage_profile, effective_fonts, out_file_str) = task_args
 
     names_dir = Path(names_dir_str)
     out_file = Path(out_file_str)
-    item_seed = (seed + i * 1_000_003) & 0x7FFFFFFF
+    item_seed = item_seed_for(seed, i)
     item_rng = random.Random(item_seed)
     item_np_rng = np.random.default_rng(item_seed)
 
@@ -361,7 +359,7 @@ def _process_one_worker_task(task_args):
     style = writer_style_for(synthetic_writer_id, seed, writer_profile)
 
     (label, img, font_used, format_profile,
-     format_id) = _generate_valid_sample(
+     format_id, cutoff_result) = _generate_valid_sample(
         field_type,
         split,
         file_name,
@@ -375,10 +373,11 @@ def _process_one_worker_task(task_args):
         item_rng,
         item_np_rng,
         edge_clipping=edge_clipping,
-        semi_broken_params=semi_broken_params,
+        stroke_damage_profile=stroke_damage_profile,
     )
     img.save(out_file)
-    return (i, file_name, label, split, field_type, font_used, format_profile, format_id)
+    return (i, file_name, label, split, field_type, font_used, format_profile,
+            format_id, cutoff_result)
 
 
 def _run_metadata(*, seed: int, count: int, sample_mode: str,
@@ -389,8 +388,15 @@ def _run_metadata(*, seed: int, count: int, sample_mode: str,
                   generation_started_at: str, resource_estimate,
                   writer_profile, augmentation_profile,
                   counters: GenerationCounters, writer_assigner,
-                  edge_clipping: str = "none") -> dict:
+                  cutoff_profile: CutoffProfile | None = None,
+                  studio_recipe: dict | None = None,
+                  stroke_damage_profile: StrokeDamageProfile | None = None,
+                  field_weights: dict | None = None,
+                  split_fractions: tuple | None = None) -> dict:
     """Build the complete provenance record written before publication."""
+    cutoff_profile = as_cutoff_profile(cutoff_profile)
+    cutoff_path = manifest_path.parent / CUTOFF_ANNOTATIONS_FILENAME
+    has_cutoff_annotations = cutoff_path.is_file()
     return {
         "metadata_schema_version": 1,
         "generation_started_at": generation_started_at,
@@ -410,8 +416,10 @@ def _run_metadata(*, seed: int, count: int, sample_mode: str,
             "font_style": font_style,
             "cursive_group": cursive_group,
             "specific_font": specific_font,
-            "edge_clipping": edge_clipping,
+            "edge_clipping": cutoff_profile.profile_id,
             "font_files": [Path(path).name for path in effective_fonts],
+            "field_weights": field_weights,
+            "split_fractions": list(split_fractions) if split_fractions else None,
         },
         "preprocessing": {
             "id": PREPROCESSING_ID,
@@ -427,6 +435,18 @@ def _run_metadata(*, seed: int, count: int, sample_mode: str,
         "image_statistics": IMAGE_STATISTICS_FILENAME,
         "writer_style_profile": writer_profile.to_metadata(),
         "augmentation_profile": augmentation_profile.to_metadata(),
+        "stroke_damage_profile": (
+            None if stroke_damage_profile is None
+            else stroke_damage_profile.to_metadata()
+        ),
+        "cutoff_profile": cutoff_profile.to_metadata(),
+        "studio_recipe": studio_recipe,
+        "cutoff_annotations": (
+            CUTOFF_ANNOTATIONS_FILENAME if has_cutoff_annotations else None
+        ),
+        "cutoff_annotations_sha256": (
+            sha256_file(cutoff_path) if has_cutoff_annotations else None
+        ),
         "generation_resources": resource_estimate.to_metadata(),
         "generation_counters": counters.to_metadata(),
         "synthetic_writer_assignment": writer_assigner.to_metadata(),
@@ -438,6 +458,168 @@ def _run_metadata(*, seed: int, count: int, sample_mode: str,
         "validation_report": REPORT_FILENAME,
         "real_merge": None,
     }
+
+
+def effective_recipe(*, name: str, description: str, augmentation_profile,
+                     stroke_damage_profile, cutoff_profile, sample_mode: str,
+                     field_weights: dict, split_fractions, font_style: str,
+                     cursive_group: str, specific_font: str, names_version: str,
+                     writer_profile, samples_per_writer: int) -> StudioRecipe:
+    """The fully resolved recipe a run used; re-running it reproduces the run."""
+    augmentation = augmentation_spec_from_profile(augmentation_profile)
+    if augmentation_profile.profile_id in AUGMENTATION_PROFILE_IDS:
+        augmentation["based_on"] = augmentation_profile.profile_id
+    cutoff = cutoff_spec_from_profile(cutoff_profile)
+    if cutoff_profile.profile_id in CUTOFF_PROFILE_IDS:
+        cutoff["based_on"] = cutoff_profile.profile_id
+    return parse_recipe({
+        "format": "synthetic-generator.studio-recipe",
+        "schema_version": 2,
+        "name": name,
+        "description": description,
+        "augmentation": augmentation,
+        "stroke_damage": stroke_damage_spec_from_profile(stroke_damage_profile),
+        "cutoff": cutoff,
+        "run": {
+            "sample_mode": sample_mode,
+            "field_weights": {
+                key: value for key, value in sorted(field_weights.items()) if value
+            },
+            "split_fractions": list(split_fractions),
+            "font_style": font_style,
+            "cursive_group": cursive_group,
+            "specific_font": specific_font,
+            "names_version": names_version,
+            "writer_profile": writer_profile.profile_id,
+            "samples_per_writer": samples_per_writer,
+        },
+    })
+
+
+@dataclass(frozen=True)
+class ResolvedRun:
+    """Every generation option after defaults < recipe < explicit arguments."""
+
+    recipe: StudioRecipe | None
+    names_version: str
+    sample_mode: str
+    font_style: str
+    cursive_group: str
+    specific_font: str
+    writer_profile: WriterStyleProfile
+    samples_per_writer: int
+    augmentation_profile: AugmentationProfile
+    cutoff_profile: CutoffProfile
+    stroke_damage: StrokeDamageProfile
+    field_weights: dict
+    split_fractions: tuple[float, float, float]
+
+    def effective_recipe(self) -> StudioRecipe:
+        return effective_recipe(
+            name=self.recipe.name if self.recipe is not None else "",
+            description=self.recipe.description if self.recipe is not None else "",
+            augmentation_profile=self.augmentation_profile,
+            stroke_damage_profile=self.stroke_damage,
+            cutoff_profile=self.cutoff_profile,
+            sample_mode=self.sample_mode,
+            field_weights=self.field_weights,
+            split_fractions=self.split_fractions,
+            font_style=self.font_style,
+            cursive_group=self.cursive_group,
+            specific_font=self.specific_font,
+            names_version=self.names_version,
+            writer_profile=self.writer_profile,
+            samples_per_writer=self.samples_per_writer,
+        )
+
+
+def resolve_run(*, recipe: StudioRecipe | dict | None = None,
+                names_version=FROM_RECIPE, sample_mode=FROM_RECIPE,
+                font_style=FROM_RECIPE, cursive_group=FROM_RECIPE,
+                specific_font=FROM_RECIPE, writer_profile=FROM_RECIPE,
+                augmentation_profile=FROM_RECIPE, samples_per_writer=FROM_RECIPE,
+                edge_clipping=FROM_RECIPE, semi_broken_params=None,
+                stroke_damage_profile=None, custom_field_weights=None,
+                custom_split_fractions=None) -> ResolvedRun:
+    """Resolve generate() options without touching the filesystem."""
+    if recipe is not None and not isinstance(recipe, StudioRecipe):
+        recipe = parse_recipe(recipe)
+    settings = compose_settings(recipe)
+    run = settings["run"]
+
+    def chosen(value, key):
+        return run[key] if value is FROM_RECIPE else value
+
+    sample_mode = _normalize_sample_mode(chosen(sample_mode, "sample_mode"))
+    if stroke_damage_profile is not None and semi_broken_params is not None:
+        raise ValueError(
+            "Pass stroke_damage_profile or its alias semi_broken_params, not both")
+    if stroke_damage_profile is None and semi_broken_params is None:
+        stroke_damage = stroke_damage_from_spec(settings["stroke_damage"])
+    else:
+        stroke_damage = as_stroke_damage_profile(
+            semi_broken_params if stroke_damage_profile is None
+            else stroke_damage_profile)
+    if custom_field_weights is None:
+        custom_field_weights = run["field_weights"]
+    field_weights = (
+        dict(custom_field_weights) if custom_field_weights is not None
+        else field_weights_for_mode(sample_mode)
+    )
+    if custom_split_fractions is None:
+        custom_split_fractions = run["split_fractions"]
+    samples_per_writer = chosen(samples_per_writer, "samples_per_writer")
+    if (isinstance(samples_per_writer, bool) or not isinstance(samples_per_writer, int)
+            or samples_per_writer <= 0):
+        raise ValueError("samples_per_writer must be a positive integer")
+    augmentation_profile = (
+        augmentation_profile_from_spec(settings["augmentation"])
+        if augmentation_profile is FROM_RECIPE
+        else get_augmentation_profile(augmentation_profile)
+    )
+    cutoff_profile = (
+        cutoff_profile_from_spec(settings["cutoff"])
+        if edge_clipping is FROM_RECIPE else as_cutoff_profile(edge_clipping)
+    )
+    return ResolvedRun(
+        recipe=recipe,
+        names_version=chosen(names_version, "names_version") or config.NAMES_VERSION,
+        sample_mode=sample_mode,
+        font_style=chosen(font_style, "font_style"),
+        cursive_group=chosen(cursive_group, "cursive_group"),
+        specific_font=chosen(specific_font, "specific_font"),
+        writer_profile=get_writer_style_profile(chosen(writer_profile, "writer_profile")),
+        samples_per_writer=samples_per_writer,
+        augmentation_profile=augmentation_profile,
+        cutoff_profile=cutoff_profile,
+        stroke_damage=stroke_damage,
+        field_weights=field_weights,
+        split_fractions=config._validate_fraction_set(
+            "split", custom_split_fractions),
+    )
+
+
+def _recipe_modified(source: StudioRecipe | None, effective: StudioRecipe) -> bool:
+    """Whether the run differs from the sections its source recipe sets."""
+    if source is None:
+        return False
+    for section in source.sections:
+        wanted = source.section(section)
+        actual = effective.section(section)
+        wanted.pop("based_on", None)
+        actual.pop("based_on", None)
+        if section != "run":
+            if wanted != actual:
+                return True
+            continue
+        for key, value in wanted.items():
+            if key == "field_weights":
+                if value is None:
+                    continue
+                value = {k: v for k, v in sorted(value.items()) if v}
+            if actual.get(key) != value:
+                return True
+    return False
 
 
 def _write_evaluation_annotations_streaming(
@@ -532,22 +714,53 @@ def _write_image_statistics_artifact(dataset_dir: Path) -> None:
 
 
 def generate(count: int, dataset=None, seed: int = config.RANDOM_SEED,
-             names_version: str = None,
-             sample_mode: str = config.DEFAULT_SAMPLE_MODE,
-             font_style: str = FONT_STYLE_ALL,
-             cursive_group: str = "",
-             specific_font: str = "",
+             names_version: str | None = FROM_RECIPE,
+             sample_mode: str = FROM_RECIPE,
+             font_style: str = FROM_RECIPE,
+             cursive_group: str = FROM_RECIPE,
+             specific_font: str = FROM_RECIPE,
              progress_callback=None, show_bar: bool = True,
              cancel_event=None, archive_planned: bool = False,
-             writer_profile=DEFAULT_WRITER_PROFILE_ID,
-             augmentation_profile=DEFAULT_AUGMENTATION_PROFILE_ID,
-             samples_per_writer: int = 32,
-             edge_clipping: str | tuple[float, float, float, float] = "none",
-             semi_broken_params: dict | None = None,
+             writer_profile=FROM_RECIPE,
+             augmentation_profile=FROM_RECIPE,
+             samples_per_writer: int = FROM_RECIPE,
+             edge_clipping: str | CutoffProfile | tuple | None = FROM_RECIPE,
+             semi_broken_params: dict | StrokeDamageProfile | None = None,
              custom_field_weights: dict[str, int] | None = None,
              custom_split_fractions: tuple[float, float, float] | None = None,
-             workers: int | None = None):
-    """Generate synthetic samples into a numbered dataset folder."""
+             workers: int | None = None,
+             stroke_damage_profile: StrokeDamageProfile | None = None,
+             recipe: StudioRecipe | dict | None = None,
+             recipe_source: str | None = None):
+    """Generate synthetic samples into a numbered dataset folder.
+
+    ``recipe`` supplies resolved sections (a :class:`StudioRecipe` or recipe
+    dict); every keyword argument passed explicitly overrides it, and
+    anything neither sets takes the built-in default.  ``recipe_source``
+    names the preset it came from, for provenance.
+
+    ``stroke_damage_profile`` tunes semi-broken damage; ``semi_broken_params``
+    is the older alias and also accepts the legacy GUI dict.  Neither has
+    any effect outside semi-broken modes.  The run's effective recipe is
+    written to ``studio-recipe.json``.
+    """
+    resolved = resolve_run(
+        recipe=recipe, names_version=names_version, sample_mode=sample_mode,
+        font_style=font_style, cursive_group=cursive_group,
+        specific_font=specific_font, writer_profile=writer_profile,
+        augmentation_profile=augmentation_profile,
+        samples_per_writer=samples_per_writer, edge_clipping=edge_clipping,
+        semi_broken_params=semi_broken_params,
+        stroke_damage_profile=stroke_damage_profile,
+        custom_field_weights=custom_field_weights,
+        custom_split_fractions=custom_split_fractions,
+    )
+    recipe = resolved.recipe
+    names_version = resolved.names_version
+    sample_mode = resolved.sample_mode
+    font_style = resolved.font_style
+    cursive_group = resolved.cursive_group
+    specific_font = resolved.specific_font
     sample_mode, names_dir = _preflight_generation(
         count,
         names_version,
@@ -562,17 +775,15 @@ def generate(count: int, dataset=None, seed: int = config.RANDOM_SEED,
         raise ValueError("archive_planned must be a boolean")
     _raise_if_cancelled(cancel_event)
 
-    effective_fonts = (
-        (font_path_for(specific_font),)
-        if specific_font
-        else fonts_for_style(font_style, cursive_group)
+    effective_fonts = effective_fonts_for(font_style, cursive_group, specific_font)
+    writer_profile = resolved.writer_profile
+    augmentation_profile = resolved.augmentation_profile
+    cutoff_profile = resolved.cutoff_profile
+    stroke_damage_profile = (
+        resolved.stroke_damage if sample_mode.startswith("semi_broken") else None
     )
-    if not all(effective_fonts):
-        raise ValueError("The effective font selection contains an unavailable font")
-    effective_fonts = tuple(str(font) for font in effective_fonts)
-    writer_profile = get_writer_style_profile(writer_profile)
-    augmentation_profile = get_augmentation_profile(augmentation_profile)
-    writer_assigner = SyntheticWriterAssigner(samples_per_writer=samples_per_writer)
+    writer_assigner = SyntheticWriterAssigner(
+        samples_per_writer=resolved.samples_per_writer)
     resource_estimate = preflight_generation_resources(
         config.DATASETS_DIR,
         count,
@@ -580,8 +791,6 @@ def generate(count: int, dataset=None, seed: int = config.RANDOM_SEED,
         large_job_count=config.LARGE_GENERATION_WARNING_COUNT,
     )
     evaluation_policy = build_synthetic_evaluation_policy(effective_fonts, seed)
-    rng = random.Random(seed)
-    np_rng = np.random.default_rng(seed)
     generation_started_at = utc_now_iso()
 
     reservation = None
@@ -622,38 +831,30 @@ def generate(count: int, dataset=None, seed: int = config.RANDOM_SEED,
         print(f"  fonts  : {font_info}")
         print()
 
-        if custom_split_fractions is not None:
-            split_counts = config.allocate_split_counts(count, custom_split_fractions)
-        else:
-            split_counts = config.allocate_synthetic_split_counts(count)
-        field_weights = custom_field_weights if custom_field_weights is not None else _field_weights_for_mode(sample_mode)
+        split_fractions = resolved.split_fractions
+        split_counts = config.allocate_split_counts(count, split_fractions)
+        field_weights = resolved.field_weights
         counters = GenerationCounters()
-        plan_items = list(iter_generation_plan(
-            count,
-            field_weights,
-            split_counts,
-            rng,
-            split_order=config.SPLIT_NAMES,
-        ))
 
         # Pre-assign writer IDs and seeds sequentially for 100% thread/process safety & test determinism
         task_items = []
         work_items = []
-        for item in plan_items:
+        for item in iter_run_plan(count, seed, field_weights, split_fractions,
+                                  writer_assigner):
             i, field_type, split = item.index, item.field_type, item.split
-            file_name = f"syn_{i:06d}.png"
-            synthetic_writer_id = writer_assigner.writer_id_for(split)
+            file_name = item.file_name
+            synthetic_writer_id = item.writer_id
             style = writer_style_for(
                 synthetic_writer_id, seed, writer_profile
             )
-            item_seed = (seed + i * 1_000_003) & 0x7FFFFFFF
+            item_seed = item.item_seed
             out_file = split_dirs[split] / file_name
             work_items.append((item, file_name, synthetic_writer_id, style, item_seed))
             task_items.append((
                 i, field_type, split, file_name, str(names_dir), sample_mode,
                 font_style, cursive_group, synthetic_writer_id, seed,
-                writer_profile, augmentation_profile, edge_clipping,
-                semi_broken_params, effective_fonts, str(out_file)
+                writer_profile, augmentation_profile, cutoff_profile,
+                stroke_damage_profile, effective_fonts, str(out_file)
             ))
 
         progress = None
@@ -675,7 +876,7 @@ def generate(count: int, dataset=None, seed: int = config.RANDOM_SEED,
             item_np_rng = np.random.default_rng(item_seed)
 
             (label, img, font_used, format_profile,
-             format_id) = _generate_valid_sample(
+             format_id, cutoff_result) = _generate_valid_sample(
                 field_type,
                 split,
                 file_name,
@@ -688,13 +889,14 @@ def generate(count: int, dataset=None, seed: int = config.RANDOM_SEED,
                 augmentation_profile,
                 item_rng,
                 item_np_rng,
-                edge_clipping=edge_clipping,
-                semi_broken_params=semi_broken_params,
+                edge_clipping=cutoff_profile,
+                stroke_damage_profile=stroke_damage_profile,
             )
             out_file = split_dirs[split] / file_name
             img.save(out_file)
 
-            return (i, file_name, label, split, field_type, font_used, format_profile, format_id)
+            return (i, file_name, label, split, field_type, font_used,
+                    format_profile, format_id, cutoff_result)
 
         if workers is not None and workers > 0:
             workers = max(1, min(workers, (os.cpu_count() or 16) * 2))
@@ -703,11 +905,15 @@ def generate(count: int, dataset=None, seed: int = config.RANDOM_SEED,
         manifest_path = staging_dir / "manifest.csv"
         labels_path = staging_dir / "labels.csv"
         format_source_path = staging_dir / ".evaluation-source.csv"
+        cutoff_path = staging_dir / CUTOFF_ANNOTATIONS_FILENAME
         with (AtomicCsvWriter(manifest_path, MANIFEST_COLUMNS) as manifest_writer,
               AtomicCsvWriter(
                   labels_path, ("filename", "label", "split")) as labels_writer,
               AtomicCsvWriter(
-                  format_source_path, FORMAT_SOURCE_COLUMNS) as format_writer):
+                  format_source_path, FORMAT_SOURCE_COLUMNS) as format_writer,
+              (AtomicCsvWriter(cutoff_path, CUTOFF_ANNOTATION_COLUMNS)
+               if cutoff_profile.active
+               else contextlib.nullcontext()) as cutoff_writer):
 
             executor_cls = concurrent.futures.ProcessPoolExecutor if workers > 1 else concurrent.futures.ThreadPoolExecutor
             worker_fn = _process_one_worker_task if workers > 1 else _process_one_item
@@ -765,8 +971,11 @@ def generate(count: int, dataset=None, seed: int = config.RANDOM_SEED,
                             pending_futures[next_fut] = next_id
                         except StopIteration:
                             pass
-            except Exception:
-                executor.shutdown(wait=False, cancel_futures=True)
+            except BaseException:
+                # Cancel queued work but let in-flight samples finish, so no
+                # worker is still writing into the staging folder while the
+                # finally block removes it.
+                executor.shutdown(wait=True, cancel_futures=True)
                 raise
             else:
                 executor.shutdown(wait=True)
@@ -775,7 +984,8 @@ def generate(count: int, dataset=None, seed: int = config.RANDOM_SEED,
                 progress.close()
 
             for idx in sorted(results.keys()):
-                (i, file_name, label, split, field_type, font_used, format_profile, format_id) = results[idx]
+                (i, file_name, label, split, field_type, font_used, format_profile,
+                 format_id, cutoff_result) = results[idx]
                 manifest_writer.write({
                     "filename": file_name,
                     "label": label,
@@ -797,6 +1007,8 @@ def generate(count: int, dataset=None, seed: int = config.RANDOM_SEED,
                     "format_id": format_id,
                 })
                 counters.observe(split=split, field_type=field_type)
+                if cutoff_writer is not None and cutoff_result.is_cut:
+                    cutoff_writer.write(annotation_row(file_name, split, cutoff_result))
 
         _raise_if_cancelled(cancel_event)
         _write_evaluation_annotations_streaming(
@@ -806,6 +1018,8 @@ def generate(count: int, dataset=None, seed: int = config.RANDOM_SEED,
             evaluation_policy,
         )
         format_source_path.unlink()
+        run_recipe = resolved.effective_recipe()
+        save_recipe(staging_dir / RECIPE_FILENAME, run_recipe)
         validation_report = validate_dataset(staging_dir, expected_count=count)
         validation_report.raise_for_errors()
         _write_image_statistics_artifact(staging_dir)
@@ -830,7 +1044,20 @@ def generate(count: int, dataset=None, seed: int = config.RANDOM_SEED,
                 augmentation_profile=augmentation_profile,
                 counters=counters,
                 writer_assigner=writer_assigner,
-                edge_clipping=edge_clipping,
+                cutoff_profile=cutoff_profile,
+                studio_recipe={
+                    "file": RECIPE_FILENAME,
+                    "sha256": sha256_file(staging_dir / RECIPE_FILENAME),
+                    "name": run_recipe.name,
+                    "source_preset": recipe_source,
+                    "modified": _recipe_modified(recipe, run_recipe),
+                },
+                stroke_damage_profile=stroke_damage_profile,
+                field_weights={
+                    key: value for key, value in sorted(field_weights.items())
+                    if value
+                },
+                split_fractions=split_fractions,
             ),
         )
         _raise_if_cancelled(cancel_event)
@@ -1032,7 +1259,11 @@ def _validate_zip_archive(
             if len(Path(logical_name).parts) == 2
             and Path(logical_name).parts[0] in config.SPLIT_NAMES
         ]
-        for logical_name, member in sorted(image_members):
+        # Same order as provenance.hash_dataset_images: split order, then name.
+        split_order = {split: index for index, split in enumerate(config.SPLIT_NAMES)}
+        image_members.sort(key=lambda item: (
+            split_order[Path(item[0]).parts[0]], item[0].encode("utf-8")))
+        for logical_name, member in image_members:
             encoded_name = logical_name.encode("utf-8")
             image_digest.update(len(encoded_name).to_bytes(8, "big"))
             image_digest.update(encoded_name)
@@ -1049,6 +1280,14 @@ def _validate_zip_archive(
             validation_content=archive.read(archived_files[REPORT_FILENAME]),
             manifest_sha256=expected_snapshot["manifest.csv"],
             images_sha256=image_digest.hexdigest(),
+            cutoff_annotations_content=(
+                archive.read(archived_files[CUTOFF_ANNOTATIONS_FILENAME])
+                if CUTOFF_ANNOTATIONS_FILENAME in archived_files else None
+            ),
+            studio_recipe_content=(
+                archive.read(archived_files[RECIPE_FILENAME])
+                if RECIPE_FILENAME in archived_files else None
+            ),
         )
 
 
@@ -1094,35 +1333,93 @@ def _print_distribution(rows):
         print(f"  {field_type:<14} {n}")
 
 
-def main():
-    parser = argparse.ArgumentParser(description="Generate synthetic handwriting data.")
+def _cli_field_weights(text: str) -> dict:
+    try:
+        value = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"--custom-field-weights is not valid JSON: {exc}") from None
+    normalized, errors = validate_run({"field_weights": value},
+                                      prefix="--custom-field-weights")
+    if errors:
+        raise ValueError("; ".join(error.replace(".field_weights", "", 1) for error in errors))
+    return normalized["field_weights"]
+
+
+def main(argv: list[str] | None = None):
+    parser = argparse.ArgumentParser(
+        description="Generate synthetic handwriting data.",
+        epilog="Precedence: built-in defaults < --recipe < explicit flags.")
     parser.add_argument("--count", type=int, default=config.DEFAULT_COUNT,
                         help=f"number of samples (default {config.DEFAULT_COUNT})")
     parser.add_argument("--dataset", type=str, default=None,
                         help="dataset name or number (default: next free dataset_NNN)")
+    parser.add_argument("--recipe", metavar="PATH", default=None,
+                        help="studio recipe / preset JSON; explicit flags override it")
+    parser.add_argument("--print-recipe", action="store_true",
+                        help="print the effective recipe and exit without writing")
     parser.add_argument("--names", type=str, default=None,
                         help="names version folder under resources/ (e.g. name1, name2)")
-    parser.add_argument("--mode", type=str, default=config.DEFAULT_SAMPLE_MODE,
+    parser.add_argument("--mode", type=str, default=None,
                         choices=list(config.SAMPLE_MODES),
-                        help="sample style to generate")
-    parser.add_argument("--font-style", type=str, default=FONT_STYLE_ALL,
-                        choices=["all", "cursive"],
+                        help="sample style to generate (default regular)")
+    parser.add_argument("--font-style", type=str, default=None,
+                        choices=list(FONT_STYLES),
                         help="font pool: 'all' (default) or 'cursive' only")
     parser.add_argument("--seed", type=int, default=config.RANDOM_SEED)
-    parser.add_argument("--writer-profile", default=DEFAULT_WRITER_PROFILE_ID,
-                        help="versioned synthetic writer-style profile")
-    parser.add_argument("--augmentation-profile",
-                        default=DEFAULT_AUGMENTATION_PROFILE_ID,
-                        help="versioned scan/augmentation profile")
-    parser.add_argument("--samples-per-writer", type=int, default=32,
-                        help="samples sharing one synthetic writer style")
+    parser.add_argument("--writer-profile", default=None,
+                        help=f"versioned synthetic writer-style profile "
+                             f"(default {DEFAULT_WRITER_PROFILE_ID})")
+    parser.add_argument("--augmentation-profile", default=None,
+                        choices=sorted(AUGMENTATION_PROFILES),
+                        help=f"versioned scan/augmentation profile "
+                             f"(default {DEFAULT_AUGMENTATION_PROFILE_ID})")
+    parser.add_argument("--cutoff", default=None, choices=list(CUTOFF_PROFILES),
+                        help="character cutoff profile (default none)")
+    parser.add_argument("--samples-per-writer", type=int, default=None,
+                        help="samples sharing one synthetic writer style (default 32)")
+    parser.add_argument("--custom-split-fractions", type=float, nargs=3,
+                        metavar=("TR", "VAL", "TE"), default=None,
+                        help="train/val/test fractions summing to 1, e.g. 0.8 0.1 0.1")
+    parser.add_argument("--custom-field-weights", metavar="JSON", default=None,
+                        help='field weights as JSON, e.g. \'{"full_name": 30, "place": 16}\'')
+    parser.add_argument("--workers", type=int, default=None,
+                        help="worker processes (default: all CPU cores; output is identical)")
     parser.add_argument("--zip", action="store_true",
                         help="also package the finished dataset as a .zip archive")
     parser.add_argument("--zip-only", action="store_true",
                         help="with --zip, delete the folder and keep only the .zip")
     parser.add_argument("--yes", action="store_true",
                         help="confirm a job at or above the large-run warning threshold")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
+
+    # Validate every flag before any output folder is reserved.
+    explicit = {
+        key: value for key, value in (
+            ("names_version", args.names),
+            ("sample_mode", args.mode),
+            ("font_style", args.font_style),
+            ("writer_profile", args.writer_profile),
+            ("augmentation_profile", args.augmentation_profile),
+            ("edge_clipping", args.cutoff),
+            ("samples_per_writer", args.samples_per_writer),
+        ) if value is not None
+    }
+    try:
+        recipe = load_recipe(args.recipe) if args.recipe else None
+        if args.custom_field_weights is not None:
+            explicit["custom_field_weights"] = _cli_field_weights(args.custom_field_weights)
+        if args.custom_split_fractions is not None:
+            explicit["custom_split_fractions"] = tuple(args.custom_split_fractions)
+        if args.workers is not None and args.workers < 1:
+            raise ValueError("--workers must be at least 1")
+        resolved = resolve_run(recipe=recipe, **explicit)
+        config.validate_config(args.count)
+    except (RecipeError, ValueError) as exc:
+        parser.error(str(exc))
+
+    if args.print_recipe:
+        print(json.dumps(resolved.effective_recipe().to_dict(), indent=2, sort_keys=True))
+        return None
 
     if args.count >= config.LARGE_GENERATION_WARNING_COUNT and not args.yes:
         parser.error(
@@ -1130,14 +1427,14 @@ def main():
             "and rerun with --yes to confirm"
         )
 
-    out_dir = generate(args.count, args.dataset, args.seed, names_version=args.names,
-                       sample_mode=args.mode, font_style=args.font_style,
+    out_dir = generate(args.count, args.dataset, args.seed,
                        archive_planned=bool(args.zip or args.zip_only),
-                       writer_profile=args.writer_profile,
-                       augmentation_profile=args.augmentation_profile,
-                       samples_per_writer=args.samples_per_writer)
+                       workers=args.workers, recipe=recipe,
+                       recipe_source=Path(args.recipe).stem if args.recipe else None,
+                       **explicit)
     if args.zip or args.zip_only:
         zip_dataset(out_dir, remove_dir=args.zip_only)
+    return out_dir
 
 
 if __name__ == "__main__":

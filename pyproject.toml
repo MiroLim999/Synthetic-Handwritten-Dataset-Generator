@@ -23,6 +23,11 @@ python_version = "3.13"
 files = [
     "src/manifest.py",
     "src/image_preprocessing.py",
+    "src/studio_spec.py",
+    "src/studio_recipe.py",
+    "src/cutoff.py",
+    "src/preview.py",
+    "src/sample_pipeline.py",
 ]
 ignore_missing_imports = true
 no_implicit_optional = true
@@ -32,3 +37,24 @@ show_error_codes = true
 # Type checking starts with the small, explicitly typed data contracts above.
 # Add modules here as their annotations are completed; do not suppress new
 # errors by globally ignoring them.
+
+# Modules imported by the checked ones but not yet annotated: analyse them
+# for types without reporting their own errors.  Remove a module from this
+# list when it joins ``files`` above.
+[[tool.mypy.overrides]]
+module = [
+    "config",
+    "src.augment",
+    "src.dataset_validation",
+    "src.fields",
+    "src.generate_synthetic",
+    "src.generation_io",
+    "src.generation_profiles",
+    "src.generation_resources",
+    "src.handoff_validation",
+    "src.image_statistics",
+    "src.provenance",
+    "src.render",
+    "src.split_policy",
+]
+follow_imports = "silent"

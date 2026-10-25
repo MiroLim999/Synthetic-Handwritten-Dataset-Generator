@@ -15,9 +15,10 @@ import subprocess
 import traceback
 import webbrowser
 import tkinter as tk
+from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
-from tkinter import ttk, messagebox, simpledialog
+from tkinter import ttk, messagebox
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -26,15 +27,22 @@ from PIL import Image, ImageDraw, ImageFont, ImageTk
 import random
 
 import config
+from gui_studio import (COMPARE_SAMPLES, STUDIO_CHANGED, ComparePanel,
+                        PreviewGrid, StudioPanel, comparison_hints,
+                        real_scan_paths)
+from gui_widgets import format_value, snap_value  # noqa: F401  (re-exported)
 from src import fields
-from src.augment import degrade, EDGE_CLIPPING_RANGES
-from src.generation_profiles import (AUGMENTATION_PROFILES,
-                                     create_custom_augmentation_profile,
-                                     get_augmentation_profile)
-from src.generate_synthetic import (GenerationCancelled, generate,
-                                    guarded_remove_dataset, zip_dataset)
+from src.augment import degrade
+from src.generation_profiles import (DEFAULT_WRITER_PROFILE_ID, CutoffProfile,
+                                     StrokeDamageProfile)
+from src.generate_synthetic import (GenerationCancelled, field_weights_for_mode,
+                                    generate, guarded_remove_dataset,
+                                    zip_dataset)
 from src.generation_io import verify_sha256_sidecar
 from src.generation_resources import preflight_generation_resources
+from src.image_statistics import compare_image_statistics
+from src.preview import preview_samples, retry_statistics
+from src.studio_recipe import StudioRecipe, StudioState
 from src.build_splits import build
 from src.render import (CURSIVE_STYLE_GROUPS, fonts_for_style,
                         font_display_name, font_path_for)
@@ -60,6 +68,8 @@ SAMPLE_TEXT = "Juan Dela Cruz"
 LOG_DIR = config.ROOT / "logs"
 LOG_FILE = LOG_DIR / "gui.log"
 PRESET_DIR = config.RESOURCES_DIR / "presets"
+PREVIEW_DEBOUNCE_MS = 150
+RETRY_SAMPLES = 48
 MAX_LOG_BYTES = 2 * 1024 * 1024
 LOG_BACKUPS = 3
 
@@ -99,6 +109,54 @@ if sys.stdout is None:
     sys.stdout = open(LOG_FILE.with_name("gui-stdout.log"), "a", encoding="utf-8")
 if sys.stderr is None:
     sys.stderr = open(LOG_FILE, "a", encoding="utf-8")
+
+
+def _split_percent(fraction: float) -> str:
+    """Display a split fraction as the percent text the split entries use."""
+    return f"{round(fraction * 100.0, 2):g}"
+
+
+def mode_field_weights(sample_mode: str) -> dict[str, int]:
+    """Weights for every supported field type, 0 for types the mode skips."""
+    weights = field_weights_for_mode(sample_mode)
+    return {
+        ftype: int(weights.get(ftype, 0))
+        for ftype in sorted(config.SUPPORTED_FIELD_TYPES)
+    }
+
+
+class RunOptionsError(ValueError):
+    """Invalid GUI input, carrying the title of the dialog that reports it."""
+
+    def __init__(self, title: str, message: str):
+        super().__init__(message)
+        self.title = title
+
+
+@dataclass(frozen=True)
+class RunOptions:
+    """Plain-value snapshot of every Tk-backed option a generation run uses."""
+
+    count: int
+    dataset: str | None
+    seed: int
+    names_version: str | None
+    sample_mode: str
+    font_style: str
+    cursive_group: str
+    specific_font: str
+    augmentation_profile: object
+    edge_clipping: CutoffProfile
+    stroke_damage_profile: StrokeDamageProfile | None
+    merge_real: bool
+    package_zip: bool
+    custom_field_weights: dict | None
+    custom_split_fractions: tuple | None
+    workers: int | None
+    writer_profile: str = DEFAULT_WRITER_PROFILE_ID
+    samples_per_writer: int = 32
+    recipe: StudioRecipe | None = None
+    recipe_source: str | None = None
 
 
 def _open_path_portably(path: Path, *, select_file: bool = False) -> None:
@@ -159,20 +217,28 @@ class App(tk.Tk):
         self.preview_field_var = tk.StringVar(value="Auto (Sampled)")
         self.preview_degraded_var = tk.BooleanVar(value=True)
 
-        self.split_train_var = tk.StringVar(value=str(int(config.SYNTH_TRAIN_FRAC * 100)))
-        self.split_val_var = tk.StringVar(value=str(int(config.SYNTH_VAL_FRAC * 100)))
-        self.split_test_var = tk.StringVar(value=str(int(config.SYNTH_TEST_FRAC * 100)))
+        self.split_train_var = tk.StringVar(value=_split_percent(config.SYNTH_TRAIN_FRAC))
+        self.split_val_var = tk.StringVar(value=_split_percent(config.SYNTH_VAL_FRAC))
+        self.split_test_var = tk.StringVar(value=_split_percent(config.SYNTH_TEST_FRAC))
         self.field_weight_vars = {}
-        for ftype in sorted(config.SUPPORTED_FIELD_TYPES):
-            weight = config.FIELD_WEIGHTS.get(ftype, 1)
+        self._field_weights_mode = config.DEFAULT_SAMPLE_MODE
+        for ftype, weight in mode_field_weights(config.DEFAULT_SAMPLE_MODE).items():
             self.field_weight_vars[ftype] = tk.StringVar(value=str(weight))
-        self.preset_var = tk.StringVar(value="")
+        self.studio_state = StudioState.default()
+        self.studio_panel = None
+        self.preview_grid = None
+        self._preview_token = 0
+        self._preview_after = None
+        self._preview_temp_seed = random.randint(1, 2_147_483_647)
+        self._mean_attempts = 1.0
+        self._scroll_areas = []        # (tab, canvas) pairs for wheel scrolling
 
         self._apply_theme()
         self._build_ui()
         self.protocol("WM_DELETE_WINDOW", self._on_close)
         self._update_preflight_estimates()
         self.after(150, self._update_preview)
+        self.after(300, self._schedule_studio_preview)
         self.after(150, self._refresh_datasets)
         self.after(100, self._poll)
 
@@ -383,140 +449,119 @@ class App(tk.Tk):
         self.nb.pack(fill="both", expand=True, padx=8, pady=(8, 8))
 
         self.tab_generate = ttk.Frame(self.nb)
+        self.tab_studio = ttk.Frame(self.nb)
         self.tab_datasets = ttk.Frame(self.nb)
         self.nb.add(self.tab_generate, text="  Generate  ")
+        self.nb.add(self.tab_studio, text="  Studio  ")
         self.nb.add(self.tab_datasets, text="  Datasets  ")
         self.nb.bind("<<NotebookTabChanged>>", self._on_tab_change)
 
         self._build_generate_tab(self.tab_generate)
+        self._build_studio_tab(self.tab_studio)
         self._build_datasets_tab(self.tab_datasets)
+        self.bind_all("<MouseWheel>", self._on_mousewheel)
+        self.bind_all("<Button-4>", self._on_mousewheel)
+        self.bind_all("<Button-5>", self._on_mousewheel)
+
+    def _scroll_area(self, parent, tab):
+        """A vertically scrolling frame inside ``parent``, registered for the wheel."""
+        viewport = tk.Canvas(parent, bg=BG, highlightthickness=0, borderwidth=0)
+        scrollbar = ttk.Scrollbar(parent, orient="vertical", command=viewport.yview)
+        viewport.configure(yscrollcommand=scrollbar.set)
+        scrollbar.pack(side="right", fill="y")
+        viewport.pack(side="left", fill="both", expand=True)
+        inner = ttk.Frame(viewport)
+        window = viewport.create_window((0, 0), window=inner, anchor="nw")
+        inner.bind("<Configure>",
+                   lambda _event: viewport.configure(scrollregion=viewport.bbox("all")))
+        viewport.bind("<Configure>",
+                      lambda event: viewport.itemconfigure(window, width=event.width))
+        self._scroll_areas.append((tab, viewport))
+        return inner
+
+    def _scroll_target(self, widget):
+        """The registered scroll canvas under ``widget`` on the visible tab."""
+        if widget is None:
+            return None
+        selected = self.nb.select()
+        path = str(widget)
+        for tab, viewport in self._scroll_areas:
+            if str(tab) == selected and (path == str(viewport)
+                                         or path.startswith(str(viewport) + ".")):
+                return viewport
+        return None
+
+    def _on_mousewheel(self, event):
+        try:
+            target_vp = self._scroll_target(
+                self.winfo_containing(event.x_root, event.y_root))
+        except (KeyError, tk.TclError):
+            target_vp = None
+        if target_vp is None:
+            return
+        bbox = target_vp.bbox("all")
+        if not bbox:
+            return
+        content_height = bbox[3] - bbox[1]
+        visible_height = target_vp.winfo_height()
+        if content_height <= visible_height or visible_height <= 0:
+            return
+        step_pixels = 22.0
+        if event.num == 4:
+            delta_px = -step_pixels
+        elif event.num == 5:
+            delta_px = step_pixels
+        elif event.delta:
+            delta_px = max(-2.5, min(2.5, -(event.delta / 120.0))) * step_pixels
+        else:
+            return
+        fraction = delta_px / (content_height - visible_height)
+        target_vp.yview_moveto(max(0.0, min(1.0, target_vp.yview()[0] + fraction)))
+
+    def _build_studio_tab(self, parent):
+        cols = ttk.Panedwindow(parent, orient="horizontal")
+        cols.pack(fill="both", expand=True, padx=8, pady=(4, 4))
+        left_container = ttk.Frame(cols)
+        right_container = ttk.Frame(cols)
+        cols.add(left_container, weight=5)
+        cols.add(right_container, weight=6)
+        inner = self._scroll_area(left_container, parent)
+        preview_area = self._scroll_area(right_container, parent)
+        self._section_label(preview_area, "Preview of the planned run")
+        outer = ttk.Frame(preview_area)
+        outer.pack(fill="x", padx=16)
+        self.preview_grid = PreviewGrid(outer, on_request=self._schedule_studio_preview,
+                                        background=SURFACE)
+        self.preview_grid.pack(fill="x")
+        self._section_label(preview_area, "Compare with real scans")
+        compare_outer = ttk.Frame(preview_area)
+        compare_outer.pack(fill="x", padx=16, pady=(0, 12))
+        self.compare_panel = ComparePanel(compare_outer, on_compare=self._start_compare)
+        self.compare_panel.pack(fill="x")
+        self.studio_panel = StudioPanel(
+            inner, state=self.studio_state, background=SURFACE,
+            preset_dir=PRESET_DIR, on_recipe_loaded=self._apply_loaded_recipe,
+            run_section=self._current_run_section,
+            cli_options=self._cli_options)
+        self.studio_panel.pack(fill="both", expand=True, pady=(0, 12))
+        self.studio_panel.bind(STUDIO_CHANGED, self._on_studio_changed)
+        self._run_controls.extend(self.studio_panel.controls())
+        self._run_controls.extend(self.preview_grid.controls())
+        self._run_controls.extend(self.compare_panel.controls())
+        self._sync_stroke_damage_state()
 
     # ------------------------------------------------------------------
     def _build_generate_tab(self, parent):
-        # Two-column layout: Left pane scrolls controls & Developer Studio,
-        # Right pane stays fixed with Live Preview & Generation Progress.
+        # Two-column layout: the left pane scrolls the run settings, the right
+        # pane holds the live preview, estimates, and progress.
         cols = ttk.Panedwindow(parent, orient="horizontal")
         cols.pack(fill="both", expand=True, padx=8, pady=(4, 4))
-
         left_container = ttk.Frame(cols)
         right_container = ttk.Frame(cols)
         cols.add(left_container, weight=5)
         cols.add(right_container, weight=5)
-
-        # Left pane viewport (independent scrollable canvas for controls)
-        viewport = tk.Canvas(
-            left_container, bg=BG, highlightthickness=0, borderwidth=0
-        )
-        scrollbar = ttk.Scrollbar(
-            left_container, orient="vertical", command=viewport.yview
-        )
-        viewport.configure(yscrollcommand=scrollbar.set)
-        scrollbar.pack(side="right", fill="y")
-        viewport.pack(side="left", fill="both", expand=True)
-
-        left = ttk.Frame(viewport)
-        content_window = viewport.create_window((0, 0), window=left, anchor="nw")
-        left.bind(
-            "<Configure>",
-            lambda _event: viewport.configure(scrollregion=viewport.bbox("all")),
-        )
-        viewport.bind(
-            "<Configure>",
-            lambda event: viewport.itemconfigure(content_window, width=event.width),
-        )
-
-        # Right pane viewport (independent scrollable canvas for preview & progress)
-        right_viewport = tk.Canvas(
-            right_container, bg=BG, highlightthickness=0, borderwidth=0
-        )
-        right_scrollbar = ttk.Scrollbar(
-            right_container, orient="vertical", command=right_viewport.yview
-        )
-        right_viewport.configure(yscrollcommand=right_scrollbar.set)
-        right_scrollbar.pack(side="right", fill="y")
-        right_viewport.pack(side="left", fill="both", expand=True)
-
-        right = ttk.Frame(right_viewport)
-        right_window = right_viewport.create_window((0, 0), window=right, anchor="nw")
-        right.bind(
-            "<Configure>",
-            lambda _event: right_viewport.configure(scrollregion=right_viewport.bbox("all")),
-        )
-        right_viewport.bind(
-            "<Configure>",
-            lambda event: right_viewport.itemconfigure(right_window, width=event.width),
-        )
-
-        self._target_scroll_pos = 0.0
-        self._smooth_scroll_timer = None
-
-        def _on_mousewheel(event):
-            try:
-                if self.nb.index(self.nb.select()) != 0:
-                    return
-            except Exception:
-                pass
-
-            target_vp = viewport
-            try:
-                w = self.winfo_containing(event.x_root, event.y_root)
-                if w and (str(right_container) in str(w) or w == right_container or w == right):
-                    target_vp = right_viewport
-            except Exception:
-                pass
-
-            bbox = target_vp.bbox("all")
-            if not bbox:
-                return
-            content_height = bbox[3] - bbox[1]
-            visible_height = target_vp.winfo_height()
-            if content_height <= visible_height or visible_height <= 0:
-                return
-
-            scrollable_height = content_height - visible_height
-            current_target = target_vp.yview()[0]
-
-            step_pixels = 22.0
-            if event.num == 4:
-                delta_px = -step_pixels
-            elif event.num == 5:
-                delta_px = step_pixels
-            elif event.delta:
-                raw_notches = -(event.delta / 120.0)
-                clamped_notches = max(-2.5, min(2.5, raw_notches))
-                delta_px = clamped_notches * step_pixels
-            else:
-                return
-
-            delta_fraction = delta_px / scrollable_height
-            new_target = max(0.0, min(1.0, current_target + delta_fraction))
-            target_vp.yview_moveto(new_target)
-
-        def _bind_mousewheel(_event=None):
-            self.bind_all("<MouseWheel>", _on_mousewheel)
-            self.bind_all("<Button-4>", _on_mousewheel)
-            self.bind_all("<Button-5>", _on_mousewheel)
-
-        def _unbind_mousewheel(_event=None):
-            self.unbind_all("<MouseWheel>")
-            self.unbind_all("<Button-4>")
-            self.unbind_all("<Button-5>")
-
-        self._bind_gen_mousewheel = _bind_mousewheel
-        self._unbind_gen_mousewheel = _unbind_mousewheel
-        self._gen_viewport = viewport
-
-        _bind_mousewheel()
-
-        def _bind_tree_mousewheel(widget):
-            widget.bind("<MouseWheel>", _on_mousewheel, add="+")
-            widget.bind("<Button-4>", _on_mousewheel, add="+")
-            widget.bind("<Button-5>", _on_mousewheel, add="+")
-            for child in widget.winfo_children():
-                _bind_tree_mousewheel(child)
-
-        self.after(200, lambda: _bind_tree_mousewheel(left_container))
-        self.after(200, lambda: _bind_tree_mousewheel(right_container))
+        left = self._scroll_area(left_container, parent)
+        right = self._scroll_area(right_container, parent)
 
         # ================= LEFT: settings =================================
         # ---- Generation settings -----------------------------------------
@@ -597,36 +642,17 @@ class App(tk.Tk):
             mrow, textvariable=self.sample_mode_var, values=mode_labels,
             state="readonly", width=26)
         self.sample_mode_cb.pack(side="left")
-        self.sample_mode_cb.bind("<<ComboboxSelected>>", lambda e: self._update_preview())
+        self.sample_mode_cb.bind("<<ComboboxSelected>>", self._on_sample_mode_change)
         self._run_controls.append(self.sample_mode_cb)
 
-        # Degradation Profile Dropdown
-        deg_row = ttk.Frame(card2, style="Card.TFrame")
-        deg_row.pack(fill="x", pady=(0, 8))
-        ttk.Label(deg_row, text="Degradation", style="CardLabel.TLabel", width=13).pack(side="left")
-        self.degradation_by_label = {label: key for key, label in config.DEGRADATION_PROFILES.items()}
-        degradation_labels = list(self.degradation_by_label)
-        self.degradation_var = tk.StringVar(value=config.DEGRADATION_PROFILES[config.DEFAULT_DEGRADATION_PROFILE])
-        self.degradation_cb = ttk.Combobox(
-            deg_row, textvariable=self.degradation_var, values=degradation_labels,
-            state="readonly", width=26)
-        self.degradation_cb.pack(side="left")
-        self.degradation_cb.bind("<<ComboboxSelected>>", self._on_degradation_preset_change)
-        self._run_controls.append(self.degradation_cb)
-
-        # Character Cutoff / Edge Clipping Dropdown
-        clip_row = ttk.Frame(card2, style="Card.TFrame")
-        clip_row.pack(fill="x", pady=(0, 8))
-        ttk.Label(clip_row, text="Char cutoff", style="CardLabel.TLabel", width=13).pack(side="left")
-        self.clipping_by_label = {label: key for key, label in config.EDGE_CLIPPING_OPTIONS.items()}
-        clipping_labels = list(self.clipping_by_label)
-        self.edge_clipping_var = tk.StringVar(value=config.EDGE_CLIPPING_OPTIONS[config.DEFAULT_EDGE_CLIPPING])
-        self.edge_clipping_cb = ttk.Combobox(
-            clip_row, textvariable=self.edge_clipping_var, values=clipping_labels,
-            state="readonly", width=26)
-        self.edge_clipping_cb.pack(side="left")
-        self.edge_clipping_cb.bind("<<ComboboxSelected>>", self._on_clipping_preset_change)
-        self._run_controls.append(self.edge_clipping_cb)
+        recipe_row = ttk.Frame(card2, style="Card.TFrame")
+        recipe_row.pack(fill="x", pady=(0, 8))
+        ttk.Label(recipe_row, text="Recipe", style="CardLabel.TLabel", width=13).pack(side="left")
+        self.recipe_summary = ttk.Label(recipe_row, text="", style="CardLabel.TLabel")
+        self.recipe_summary.pack(side="left", padx=(0, 8))
+        open_studio = ttk.Button(recipe_row, text="Open Studio", style="Quick.TButton",
+                                 command=lambda: self.nb.select(self.tab_studio))
+        open_studio.pack(side="left")
 
         # ---- Advanced Distribution (Splits & Mix) -----------------------
         self._section_label(left, "Advanced Distribution (Splits & Mix)")
@@ -669,10 +695,7 @@ class App(tk.Tk):
             cell = ttk.Frame(fw_grid, style="Card.TFrame")
             cell.grid(row=row_idx, column=col_idx, sticky="w", padx=3, pady=2)
             ttk.Label(cell, text=f"{ftype}:", style="CardHint.TLabel", width=12).pack(side="left")
-            var = self.field_weight_vars.get(ftype)
-            if var is None:
-                var = tk.StringVar(value=str(config.FIELD_WEIGHTS.get(ftype, 1)))
-                self.field_weight_vars[ftype] = var
+            var = self.field_weight_vars[ftype]
             e = ttk.Entry(cell, textvariable=var, width=4)
             e.pack(side="left")
             self._run_controls.append(e)
@@ -681,97 +704,6 @@ class App(tk.Tk):
             if col_idx >= 2:
                 col_idx = 0
                 row_idx += 1
-
-        # ---- Developer Studio (Custom Parameters) -----------------------
-        dev_hdr_row = ttk.Frame(left)
-        dev_hdr_row.pack(fill="x", pady=(8, 2))
-        ttk.Label(dev_hdr_row, text="DEVELOPER STUDIO (CUSTOM PARAMETERS)", style="Section.TLabel").pack(side="left")
-        
-        # Studio Presets Header Bar
-        preset_frame = ttk.Frame(dev_hdr_row)
-        preset_frame.pack(side="right")
-
-        self.preset_cb = ttk.Combobox(preset_frame, textvariable=self.preset_var, state="readonly", width=16)
-        self.preset_cb.pack(side="left", padx=(0, 4))
-        self._refresh_preset_list()
-
-        load_preset_btn = ttk.Button(
-            preset_frame, text="📂 Load", style="Secondary.TButton",
-            command=self._load_selected_preset)
-        load_preset_btn.pack(side="left", padx=(0, 4))
-        self._run_controls.append(load_preset_btn)
-
-        save_preset_btn = ttk.Button(
-            preset_frame, text="💾 Save", style="Secondary.TButton",
-            command=self._save_current_preset)
-        save_preset_btn.pack(side="left", padx=(0, 4))
-        self._run_controls.append(save_preset_btn)
-
-        self.reset_btn = ttk.Button(
-            preset_frame, text="🔄 Reset", style="Secondary.TButton",
-            command=self._reset_developer_defaults)
-        self.reset_btn.pack(side="left")
-        self._run_controls.append(self.reset_btn)
-
-        card_dev = self._card(left, pady=(0, 4))
-        self.dev_sliders = {}
-        self.dev_labels = {}
-        self._slider_updating = False
-
-        def _make_slider(parent, name, label_text, from_, to_, default, resolution=0.01, unit=""):
-            row = ttk.Frame(parent, style="Card.TFrame")
-            row.pack(fill="x", pady=(0, 4))
-            ttk.Label(row, text=label_text, style="CardLabel.TLabel", width=13).pack(side="left")
-            val_var = tk.DoubleVar(value=default)
-            lbl_var = tk.StringVar(value=f"{default:.2f}{unit}" if resolution < 1.0 else f"{int(default)}{unit}")
-
-            def _on_move(val):
-                if getattr(self, "_slider_updating", False):
-                    return
-                v = float(val)
-                lbl_var.set(f"{v:.2f}{unit}" if resolution < 1.0 else f"{int(v)}{unit}")
-                self._on_developer_slider_change(name)
-
-            scale = ttk.Scale(row, from_=from_, to=to_, variable=val_var, command=_on_move)
-            scale.pack(side="left", fill="x", expand=True, padx=(0, 6))
-            ttk.Label(row, textvariable=lbl_var, style="CardHint.TLabel", width=7).pack(side="left")
-            self.dev_sliders[name] = val_var
-            self.dev_labels[name] = lbl_var
-            self._run_controls.append(scale)
-
-        _make_slider(card_dev, "fade", "Ink Fading", 0.10, 1.00, 0.65)
-        _make_slider(card_dev, "tint", "Paper Tint", 0.00, 0.40, 0.15)
-        _make_slider(card_dev, "stain", "Stain Prob", 0.00, 1.00, 0.35)
-        _make_slider(card_dev, "rotate", "Tilt Angle", 0.0, 12.0, 4.5, unit="°")
-        _make_slider(card_dev, "blur", "Blur Radius", 0.0, 3.0, 0.0, unit="px")
-        _make_slider(card_dev, "noise", "Grain Noise", 0.0, 40.0, 12.0, resolution=1.0)
-        _make_slider(card_dev, "texture", "Paper Fiber", 0.0, 12.0, 3.5)
-        _make_slider(card_dev, "scanline", "Scanlines", 0.0, 30.0, 10.0, resolution=1.0)
-        _make_slider(card_dev, "jpeg", "JPEG Quality", 20.0, 100.0, 75.0, resolution=1.0)
-
-        ttk.Separator(card_dev, orient="horizontal").pack(fill="x", pady=6)
-        ttk.Label(card_dev, text="Character Cutoff / Edge Crops", style="Sub.TLabel").pack(anchor="w", pady=(0, 4))
-
-        _make_slider(card_dev, "crop_top", "Top Cut %", 0.0, 15.0, 0.0, resolution=1.0, unit="%")
-        _make_slider(card_dev, "crop_bottom", "Bottom Cut %", 0.0, 15.0, 0.0, resolution=1.0, unit="%")
-        _make_slider(card_dev, "crop_left", "Left Cut %", 0.0, 15.0, 0.0, resolution=1.0, unit="%")
-        _make_slider(card_dev, "crop_right", "Right Cut %", 0.0, 15.0, 0.0, resolution=1.0, unit="%")
-
-        ttk.Separator(card_dev, orient="horizontal").pack(fill="x", pady=6)
-        ttk.Label(card_dev, text="Stroke Damage (Semi-Broken)", style="Sub.TLabel").pack(anchor="w", pady=(0, 4))
-
-        _make_slider(card_dev, "contrast", "Contrast Drop", 0.00, 1.00, 0.80)
-        _make_slider(card_dev, "gap_prob", "Gap Prob", 0.00, 1.00, 0.90)
-        _make_slider(card_dev, "gap_count", "Gap Count", 0.0, 30.0, 16.0, resolution=1.0)
-        _make_slider(card_dev, "scratch", "Scratch Prob", 0.00, 1.00, 0.70)
-        _make_slider(card_dev, "erode", "Stroke Thin", 0.00, 1.00, 0.55)
-
-        ttk.Separator(card_dev, orient="horizontal").pack(fill="x", pady=6)
-        reset_bottom_btn = ttk.Button(
-            card_dev, text="🔄 Reset All Controls to Default", style="Secondary.TButton",
-            command=self._reset_developer_defaults)
-        reset_bottom_btn.pack(fill="x", pady=(2, 2))
-        self._run_controls.append(reset_bottom_btn)
 
         frow = ttk.Frame(card2, style="Card.TFrame")
         frow.pack(fill="x", pady=(0, 8))
@@ -828,9 +760,19 @@ class App(tk.Tk):
             variable=self.zip_var)
         self.zip_check.pack(anchor="w")
         self._run_controls.append(self.zip_check)
+        reset_all_btn = ttk.Button(
+            card3, text="Reset all", style="Secondary.TButton",
+            command=self._reset_all_controls)
+        reset_all_btn.pack(anchor="w", pady=(8, 0))
+        self._run_controls.append(reset_all_btn)
+        self._update_recipe_summary()
 
         # Trace variables for preflight estimate updates
         self.count_var.trace_add("write", lambda *args: self._update_preflight_estimates())
+        self.count_var.trace_add("write",
+                                 lambda *args: self._schedule_studio_preview(restart=True))
+        self.seed_var.trace_add("write",
+                                lambda *args: self._schedule_studio_preview(restart=True))
         self.dataset_var.trace_add("write", lambda *args: self._update_preflight_estimates())
         self.zip_var.trace_add("write", lambda *args: self._update_preflight_estimates())
 
@@ -990,14 +932,16 @@ class App(tk.Tk):
     # ------------------------------------------------------------------
     # Tab change
     # ------------------------------------------------------------------
+    def _selected_tab(self):
+        """The selected tab widget (compared by identity, never by index)."""
+        return self.nametowidget(self.nb.select())
+
     def _on_tab_change(self, _event=None):
-        if self.nb.index(self.nb.select()) == 1:   # datasets tab
-            if hasattr(self, "_unbind_gen_mousewheel"):
-                self._unbind_gen_mousewheel()
+        if self._selected_tab() is self.tab_datasets:
             self._refresh_datasets()
-        else:
-            if hasattr(self, "_bind_gen_mousewheel"):
-                self._bind_gen_mousewheel()
+        elif (self._selected_tab() is self.__dict__.get("tab_studio")
+              and self.__dict__.get("compare_panel") is not None):
+            self.compare_panel.refresh_availability()
 
     # ------------------------------------------------------------------
     # Font-style preview
@@ -1114,17 +1058,17 @@ class App(tk.Tk):
             return
 
         profile = self._build_custom_developer_profile()
-        crop_tuple = self._get_custom_crop_tuple()
-        semi_params = self._build_semi_broken_params()
-        sample_mode_key = self.mode_by_label.get(self.sample_mode_var.get(), "regular")
+        cutoff_profile = self._build_cutoff_profile()
+        stroke_damage = self._build_stroke_damage_profile()
+        sample_mode_key = self._current_sample_mode()
         damage_prof = "semi_broken" if sample_mode_key.startswith("semi_broken") else "regular"
         try:
             img = degrade(
                 img,
                 damage_profile=damage_prof,
                 augmentation_profile=profile,
-                edge_clipping=crop_tuple,
-                semi_broken_params=semi_params,
+                edge_clipping=cutoff_profile,
+                semi_broken_params=stroke_damage,
                 rng=random.Random(seed),
             )
         except Exception:
@@ -1133,113 +1077,267 @@ class App(tk.Tk):
         self._preview_img = ImageTk.PhotoImage(img)
         self.preview_label.config(image=self._preview_img, text="")
 
-    def _build_semi_broken_params(self):
-        if not hasattr(self, "dev_sliders"):
-            return None
+    def _current_sample_mode(self) -> str:
+        return self.mode_by_label.get(
+            self.sample_mode_var.get(), config.DEFAULT_SAMPLE_MODE)
+
+    def _sync_stroke_damage_state(self):
+        """Enable the Stroke Damage sliders only in semi-broken modes."""
+        if self.__dict__.get("_run_control_states"):
+            return  # a job is running; _set_job_active restores and resyncs
+        panel = self.__dict__.get("studio_panel")
+        if panel is not None:
+            panel.set_stroke_enabled(self._current_sample_mode().startswith("semi_broken"))
+
+    def _on_sample_mode_change(self, _event=None):
+        self._sync_stroke_damage_state()
+        self._apply_mode_field_weights()
+        self._update_preview()
+        self._schedule_studio_preview(restart=True)
+
+    def _grid_field_weights(self) -> dict[str, str]:
+        return {ftype: var.get().strip() for ftype, var in self.field_weight_vars.items()}
+
+    def _apply_mode_field_weights(self):
+        """Fill the weight grid with the current mode's mix.
+
+        Edits made for the previous mode are replaced, and the status line
+        says so.
+        """
+        mode = self._current_sample_mode()
+        previous = self.__dict__.get("_field_weights_mode", mode)
+        expected = {k: str(v) for k, v in mode_field_weights(previous).items()}
+        edited = self._grid_field_weights() != expected
+        self._reset_field_weights()
+        if edited and mode != previous and "status" in self.__dict__:
+            self.status.config(
+                text=(f"Field weights reset to the {config.SAMPLE_MODES[mode]} mix; "
+                      "your edits were replaced."),
+                foreground=WARNING)
+
+    # ------------------------------------------------------------------
+    # Studio state
+    # ------------------------------------------------------------------
+    def _on_studio_changed(self, _event=None):
+        self.studio_state = self.studio_panel.get_state()
+        self._update_recipe_summary()
+        self._schedule_generate_preview()
+        self._schedule_studio_preview(restart=True)
+
+    def _schedule_generate_preview(self):
+        """Debounce the Generate tab's live preview so dragging stays smooth."""
+        pending = self.__dict__.get("_generate_preview_after")
+        if pending is not None:
+            self.after_cancel(pending)
+
+        def run():
+            self._generate_preview_after = None
+            self._update_preview()
+        self._generate_preview_after = self.after(PREVIEW_DEBOUNCE_MS, run)
+
+    # ------------------------------------------------------------------
+    # Studio preview (background rendering)
+    # ------------------------------------------------------------------
+    def _schedule_studio_preview(self, restart: bool = False):
+        """Render the preview 150 ms after the last change."""
+        grid = self.__dict__.get("preview_grid")
+        if grid is None:
+            return
+        if restart:
+            grid.offset = 0
+        if self._preview_after is not None:
+            self.after_cancel(self._preview_after)
+        self._preview_after = self.after(PREVIEW_DEBOUNCE_MS, self._start_studio_preview)
+
+    def _preview_request(self) -> dict:
+        """A plain-data snapshot of everything the preview needs."""
+        options = self._snapshot_run_options()
+        raw_seed = self.seed_var.get().strip()
+        temporary = not raw_seed
+        grid = self.preview_grid
+        panel = self.__dict__.get("studio_panel")
+        bypassed = panel.bypassed() if panel is not None else ()
+        if bypassed:
+            preview_state = panel.preview_state()
+            options = replace(
+                options,
+                augmentation_profile=preview_state.augmentation_profile(),
+                edge_clipping=preview_state.cutoff_profile(),
+                stroke_damage_profile=(preview_state.stroke_damage_profile()
+                                       if options.stroke_damage_profile is not None
+                                       else None))
+        notes = []
+        if temporary:
+            notes.append("Example only: the seed is blank, so the run will pick its "
+                         "own seed.")
+        if bypassed:
+            names = ", ".join("cutoff" if effect == "*" else effect.replace("_", " ")
+                              for _section, effect in bypassed)
+            notes.append(f"A/B: {names} bypassed in this preview only.")
         return {
-            "contrast_prob": self.dev_sliders["contrast"].get(),
-            "gap_prob": self.dev_sliders["gap_prob"].get(),
-            "gap_count": int(round(self.dev_sliders["gap_count"].get())),
-            "scratch_prob": self.dev_sliders["scratch"].get(),
-            "erode_prob": self.dev_sliders["erode"].get(),
+            "options": {
+                "names_version": options.names_version,
+                "sample_mode": options.sample_mode,
+                "font_style": options.font_style,
+                "cursive_group": options.cursive_group,
+                "specific_font": options.specific_font,
+                "writer_profile": options.writer_profile,
+                "samples_per_writer": options.samples_per_writer,
+                "augmentation_profile": options.augmentation_profile,
+                "edge_clipping": options.edge_clipping,
+                "stroke_damage_profile": options.stroke_damage_profile,
+                "custom_field_weights": options.custom_field_weights,
+                "custom_split_fractions": options.custom_split_fractions,
+            },
+            "count": options.count,
+            "seed": self._preview_temp_seed if temporary else options.seed,
+            "note": " ".join(notes),
+            "n": grid.tile_count,
+            "offset": grid.offset,
+            "split": grid.split,
         }
 
-    def _build_custom_developer_profile(self):
-        if not hasattr(self, "dev_sliders"):
-            degradation_key = self.degradation_by_label.get(
-                self.degradation_var.get(), config.DEFAULT_DEGRADATION_PROFILE
-            )
-            return get_augmentation_profile(degradation_key)
-
-        preset_key = self.degradation_by_label.get(self.degradation_var.get(), "")
-        if preset_key and preset_key != "custom_dev_v1" and preset_key in AUGMENTATION_PROFILES:
-            return get_augmentation_profile(preset_key)
-
-        return create_custom_augmentation_profile(
-            fade_contrast=self.dev_sliders["fade"].get(),
-            paper_tint_alpha=self.dev_sliders["tint"].get(),
-            stain_prob=self.dev_sliders["stain"].get(),
-            rotate_deg=self.dev_sliders["rotate"].get(),
-            blur_radius=self.dev_sliders["blur"].get(),
-            noise_std=self.dev_sliders["noise"].get(),
-            paper_texture_std=self.dev_sliders["texture"].get(),
-            scanline_alpha=int(round(self.dev_sliders["scanline"].get())),
-            jpeg_quality=int(round(self.dev_sliders["jpeg"].get())),
-        )
-
-    def _get_custom_crop_tuple(self):
-        if not hasattr(self, "dev_sliders"):
-            preset_key = self.clipping_by_label.get(self.edge_clipping_var.get(), "none")
-            return preset_key
-
-        preset_key = self.clipping_by_label.get(self.edge_clipping_var.get(), "")
-        if preset_key and preset_key != "custom":
-            return preset_key
-
-        top_p = self.dev_sliders["crop_top"].get() / 100.0
-        bottom_p = self.dev_sliders["crop_bottom"].get() / 100.0
-        left_p = self.dev_sliders["crop_left"].get() / 100.0
-        right_p = self.dev_sliders["crop_right"].get() / 100.0
-        if top_p <= 0 and bottom_p <= 0 and left_p <= 0 and right_p <= 0:
-            return "none"
-        return (top_p, bottom_p, left_p, right_p)
-
-    def _on_degradation_preset_change(self, _event=None):
-        preset_label = self.degradation_var.get()
-        preset_key = self.degradation_by_label.get(preset_label, "historical_scan_v1")
-        if preset_key in AUGMENTATION_PROFILES and hasattr(self, "dev_sliders"):
-            prof = AUGMENTATION_PROFILES[preset_key]
-            self._slider_updating = True
-            self.dev_sliders["fade"].set((prof.fade_range[0] + prof.fade_range[1]) / 2.0)
-            self.dev_sliders["tint"].set((prof.paper_tint_alpha_range[0] + prof.paper_tint_alpha_range[1]) / 2.0)
-            self.dev_sliders["stain"].set(prof.stain_probability)
-            self.dev_sliders["rotate"].set(prof.rotate_degrees)
-            self.dev_sliders["blur"].set((prof.blur_radius_range[0] + prof.blur_radius_range[1]) / 2.0)
-            self.dev_sliders["noise"].set((prof.noise_std_range[0] + prof.noise_std_range[1]) / 2.0)
-            self.dev_sliders["texture"].set((prof.paper_texture_std_range[0] + prof.paper_texture_std_range[1]) / 2.0)
-            self.dev_sliders["scanline"].set((prof.scanline_alpha_range[0] + prof.scanline_alpha_range[1]) / 2.0)
-            self.dev_sliders["jpeg"].set((prof.jpeg_quality_range[0] + prof.jpeg_quality_range[1]) / 2.0)
-            for k, var in self.dev_sliders.items():
-                if k.startswith("crop_"):
-                    continue
-                v = var.get()
-                unit = "°" if k == "rotate" else ("px" if k == "blur" else "")
-                res = 1.0 if k in ("noise", "scanline", "jpeg", "gap_count") or "crop" in k else 0.01
-                self.dev_labels[k].set(f"{v:.2f}{unit}" if res < 1.0 else f"{int(v)}{unit}")
-            self._slider_updating = False
-        self._update_preview()
-
-    def _on_clipping_preset_change(self, _event=None):
-        preset_label = self.edge_clipping_var.get()
-        preset_key = self.clipping_by_label.get(preset_label, "none")
-        if preset_key in EDGE_CLIPPING_RANGES and hasattr(self, "dev_sliders"):
-            r = EDGE_CLIPPING_RANGES[preset_key]
-            avg_pct = round(((r[0] + r[1]) / 2.0) * 100.0)
-            self._slider_updating = True
-            for side in ("crop_top", "crop_bottom", "crop_left", "crop_right"):
-                self.dev_sliders[side].set(avg_pct)
-                self.dev_labels[side].set(f"{int(avg_pct)}%")
-            self._slider_updating = False
-        self._update_preview()
-
-    def _on_developer_slider_change(self, slider_name=""):
-        if getattr(self, "_slider_updating", False):
+    def _start_studio_preview(self):
+        self._preview_after = None
+        self._preview_token += 1
+        token = self._preview_token
+        try:
+            request = self._preview_request()
+        except RunOptionsError as exc:
+            self.preview_grid.show_error(str(exc))
             return
-        if slider_name.startswith("crop_"):
-            if "custom" in self.clipping_by_label.values():
-                self.edge_clipping_var.set(config.EDGE_CLIPPING_OPTIONS["custom"])
+        self.preview_grid.set_busy()
+        threading.Thread(target=self._preview_worker, args=(token, request),
+                         daemon=True).start()
+
+    def _preview_worker(self, token: int, request: dict):
+        """Render preview tiles and retry statistics; reports only through q."""
+        try:
+            tiles = preview_samples(request["options"], count=request["count"],
+                                    seed=request["seed"], n=request["n"],
+                                    offset=request["offset"], split=request["split"])
+            self.q.put(("studio_preview", token, tiles, request["note"]))
+            stats = retry_statistics(request["options"], count=request["count"],
+                                     seed=request["seed"],
+                                     samples=min(RETRY_SAMPLES, request["count"]))
+            self.q.put(("studio_retry", token, stats))
+        except Exception as exc:
+            _log_error("studio preview", traceback.format_exc())
+            self.q.put(("studio_preview_error", token, str(exc) or exc.__class__.__name__))
+
+    def _start_compare(self):
+        try:
+            request = self._preview_request()
+        except RunOptionsError as exc:
+            self.compare_panel.show_error(str(exc))
+            return
+        request.update(n=COMPARE_SAMPLES, offset=0, split=None)
+        threading.Thread(target=self._compare_worker, args=(request,), daemon=True).start()
+
+    def _compare_worker(self, request: dict):
+        """Compare preview samples with real scans; reports only through q."""
+        try:
+            real = real_scan_paths()
+            tiles = preview_samples(request["options"], count=request["count"],
+                                    seed=request["seed"], n=request["n"])
+            images = [tile.image for tile in tiles if tile.image is not None]
+            comparison = compare_image_statistics(images, real)
+            self.q.put(("studio_compare", comparison_hints(comparison), len(real),
+                        len(images)))
+        except Exception as exc:
+            _log_error("studio comparison", traceback.format_exc())
+            self.q.put(("studio_compare_error", str(exc) or exc.__class__.__name__))
+
+    def _handle_preview_message(self, msg):
+        """Apply a preview result on the UI thread; stale tokens are dropped."""
+        kind, token = msg[0], msg[1]
+        if token != self._preview_token or self.__dict__.get("preview_grid") is None:
+            return
+        if kind == "studio_preview":
+            self.preview_grid.show_tiles(msg[2], msg[3])
+        elif kind == "studio_retry":
+            stats = msg[2]
+            self._mean_attempts = stats.mean_attempts
+            self.preview_grid.set_retry_text(
+                f"Retry estimate ({stats.samples} samples): {stats.describe()}.")
+            self._update_preflight_estimates()
         else:
-            if "custom_dev_v1" in self.degradation_by_label.values():
-                self.degradation_var.set(config.DEGRADATION_PROFILES["custom_dev_v1"])
+            self.preview_grid.show_error(msg[2])
+
+    def _set_studio_state(self, state: StudioState):
+        self.studio_state = state
+        panel = self.__dict__.get("studio_panel")
+        if panel is not None:
+            panel.set_state(state)
+        self._update_recipe_summary()
+
+    def _update_recipe_summary(self):
+        label = self.__dict__.get("recipe_summary")
+        if label is None:
+            return
+        state = self.studio_state
+        marker = "*" if state.dirty else ""
+        based_on = state.augmentation_profile().profile_id
+        label.config(text=f"{state.source_name}{marker} - based on {based_on}")
+
+    def _build_stroke_damage_profile(self):
+        """Stroke damage profile, or None outside semi-broken modes."""
+        if not self._current_sample_mode().startswith("semi_broken"):
+            return None
+        return self.studio_state.stroke_damage_profile()
+
+    def _build_custom_developer_profile(self):
+        return self.studio_state.augmentation_profile()
+
+    def _build_cutoff_profile(self):
+        return self.studio_state.cutoff_profile()
+
+    def _apply_loaded_recipe(self, key: str, recipe: StudioRecipe):
+        """Apply a loaded preset: its effect sections to the studio, its run
+        section to the Generate tab.  Only sections the recipe contains change.
+        """
+        self._set_studio_state(self.studio_state.loaded(
+            recipe, source_name=recipe.name or key, source_key=key))
+        if recipe.run is not None:
+            self._apply_run_section(recipe.run)
+        self._sync_stroke_damage_state()
         self._update_preview()
+        sections = ", ".join(recipe.sections) or "no sections"
+        name = recipe.name or key
+        self.status.config(text=f"Loaded preset {name}: {sections}.", foreground=SUCCESS)
 
-    def _reset_developer_defaults(self):
-        """Reset all controls and sliders back to standard defaults."""
-        self._slider_updating = True
+    def _current_run_section(self) -> dict:
+        """The Generate tab's run settings as a recipe ``run`` section."""
+        options = self._snapshot_run_options()
+        return {
+            "sample_mode": options.sample_mode,
+            "field_weights": {k: v for k, v in (options.custom_field_weights or {}).items()
+                              if v},
+            "split_fractions": list(options.custom_split_fractions
+                                    or config.synthetic_split_fractions()),
+            "font_style": options.font_style,
+            "cursive_group": options.cursive_group,
+            "specific_font": options.specific_font,
+            "names_version": options.names_version or config.NAMES_VERSION,
+            "writer_profile": options.writer_profile,
+            "samples_per_writer": options.samples_per_writer,
+        }
 
+    def _cli_options(self) -> dict:
+        """Count and seed for a copied CLI command."""
+        return {"count": self.count_var.get().replace(",", "").strip(),
+                "seed": self.seed_var.get().strip(),
+                "mode": self._current_sample_mode()}
+
+    def _reset_all_controls(self):
+        """Reset every Generate-tab control, including weights and splits."""
         self.sample_mode_var.set(config.SAMPLE_MODES[config.DEFAULT_SAMPLE_MODE])
-        self.degradation_var.set(config.DEGRADATION_PROFILES[config.DEFAULT_DEGRADATION_PROFILE])
-        self.edge_clipping_var.set(config.EDGE_CLIPPING_OPTIONS[config.DEFAULT_EDGE_CLIPPING])
+        self._sync_stroke_damage_state()
+        self._reset_field_weights()
+        self.split_train_var.set(_split_percent(config.SYNTH_TRAIN_FRAC))
+        self.split_val_var.set(_split_percent(config.SYNTH_VAL_FRAC))
+        self.split_test_var.set(_split_percent(config.SYNTH_TEST_FRAC))
+        self._update_split_sum_label()
         self.count_var.set(str(config.DEFAULT_COUNT))
         self.seed_var.set(str(config.RANDOM_SEED))
         if hasattr(self, "workers_var"):
@@ -1250,36 +1348,10 @@ class App(tk.Tk):
         self._on_font_style_change()
         self.real_var.set(False)
         self.zip_var.set(False)
-
-        defaults = {
-            "fade": 0.65,
-            "tint": 0.15,
-            "stain": 0.35,
-            "rotate": 4.5,
-            "blur": 0.0,
-            "noise": 12.0,
-            "texture": 3.5,
-            "scanline": 10.0,
-            "jpeg": 75.0,
-            "crop_top": 0.0,
-            "crop_bottom": 0.0,
-            "crop_left": 0.0,
-            "crop_right": 0.0,
-            "contrast": 0.80,
-            "gap_prob": 0.90,
-            "gap_count": 16.0,
-            "scratch": 0.70,
-            "erode": 0.55,
-        }
-
-        for name, def_val in defaults.items():
-            if hasattr(self, "dev_sliders") and name in self.dev_sliders:
-                self.dev_sliders[name].set(def_val)
-                unit = "°" if name == "rotate" else ("px" if name == "blur" else ("%" if "crop" in name else ""))
-                res = 1.0 if name in ("noise", "scanline", "jpeg", "gap_count") or "crop" in name else 0.01
-                self.dev_labels[name].set(f"{def_val:.2f}{unit}" if res < 1.0 else f"{int(def_val)}{unit}")
-
-        self._slider_updating = False
+        self._run_writer_profile = DEFAULT_WRITER_PROFILE_ID
+        self._run_samples_per_writer = 32
+        self._set_studio_state(StudioState.default())
+        self._sync_stroke_damage_state()
         self._update_preview()
 
     def _update_preflight_estimates(self, _event=None):
@@ -1298,7 +1370,7 @@ class App(tk.Tk):
                 count,
                 create_archive=create_zip,
             )
-            folder_mb = estimate.estimated_bytes / (1024 * 1024)
+            folder_mb = estimate.estimated_dataset_bytes / (1024 * 1024)
             zip_mb = estimate.estimated_archive_bytes / (1024 * 1024)
 
             # Dynamically estimate throughput based on active CPU threads count
@@ -1311,9 +1383,11 @@ class App(tk.Tk):
                     except ValueError:
                         pass
             est_imgs_per_sec = max(30, min(600, active_threads * 22))
-            time_sec = max(1, round(count / est_imgs_per_sec))
+            # Retries cost whole extra attempts; the studio preview measures them.
+            mean_attempts = self.__dict__.get("_mean_attempts", 1.0)
+            time_sec = max(1, round(count / est_imgs_per_sec * mean_attempts))
 
-            self.est_folder_lbl.config(text=f"~{folder_mb:.1f} MB ({estimate.estimated_image_count:,} imgs)")
+            self.est_folder_lbl.config(text=f"~{folder_mb:.1f} MB ({estimate.sample_count:,} imgs)")
             self.est_zip_lbl.config(text=f"~{zip_mb:.1f} MB" if create_zip else "Disabled")
             self.est_time_lbl.config(text=f"~{time_sec}s (~{time_sec/60:.1f}m)" if time_sec >= 60 else f"~{time_sec}s")
         except Exception:
@@ -1332,9 +1406,11 @@ class App(tk.Tk):
         self.est_target_lbl.config(text=f"dataset/datasets/{target_folder}")
 
     def _reset_field_weights(self):
-        for ftype, def_w in config.FIELD_WEIGHTS.items():
-            if ftype in self.field_weight_vars:
-                self.field_weight_vars[ftype].set(str(def_w))
+        """Reset the weight grid to the current sample mode's mix."""
+        mode = self._current_sample_mode()
+        for ftype, weight in mode_field_weights(mode).items():
+            self.field_weight_vars[ftype].set(str(weight))
+        self._field_weights_mode = mode
 
     def _update_split_sum_label(self, _event=None):
         if not hasattr(self, "split_sum_lbl"):
@@ -1351,61 +1427,35 @@ class App(tk.Tk):
         except ValueError:
             self.split_sum_lbl.config(text="Invalid numbers", foreground=ERROR_C)
 
-    def _refresh_preset_list(self):
-        PRESET_DIR.mkdir(parents=True, exist_ok=True)
-        files = sorted(PRESET_DIR.glob("*.json"))
-        names = [f.stem for f in files]
-        if hasattr(self, "preset_cb"):
-            self.preset_cb.config(values=names)
-            if names and not self.preset_var.get():
-                self.preset_var.set(names[0])
-
-    def _load_selected_preset(self):
-        name = self.preset_var.get()
-        if not name:
-            return
-        preset_file = PRESET_DIR / f"{name}.json"
-        if not preset_file.is_file():
-            messagebox.showerror("Error", f"Preset file not found: {preset_file}")
-            return
-        try:
-            with open(preset_file, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            self._slider_updating = True
-            for k, var in self.dev_sliders.items():
-                if k in data:
-                    val = float(data[k])
-                    var.set(val)
-                    unit = "°" if k == "rotate" else ("px" if k == "blur" else ("%" if "crop" in k else ""))
-                    res = 1.0 if k in ("noise", "scanline", "jpeg", "gap_count") or "crop" in k else 0.01
-                    self.dev_labels[k].set(f"{val:.2f}{unit}" if res < 1.0 else f"{int(val)}{unit}")
-            self._slider_updating = False
-            self.degradation_var.set(config.DEGRADATION_PROFILES["custom_dev_v1"])
-            self._update_preview()
-            self.status.config(text=f"Loaded preset: {name}", foreground=SUCCESS)
-        except Exception as exc:
-            messagebox.showerror("Error loading preset", str(exc))
-
-    def _save_current_preset(self):
-        name = simpledialog.askstring("Save Preset", "Enter a name for this Developer Studio preset:")
-        if not name or not name.strip():
-            return
-        safe_name = name.strip().replace(" ", "_").lower()
-        PRESET_DIR.mkdir(parents=True, exist_ok=True)
-        preset_file = PRESET_DIR / f"{safe_name}.json"
-
-        data = {"name": name.strip()}
-        for k, var in self.dev_sliders.items():
-            data[k] = var.get()
-
-        try:
-            with open(preset_file, "w", encoding="utf-8") as f:
-                json.dump(data, f, indent=2)
-            self._refresh_preset_list()
-            self.preset_var.set(safe_name)
-            self.status.config(text=f"Saved preset: {safe_name}", foreground=SUCCESS)
-        except Exception as exc:
-            messagebox.showerror("Error saving preset", str(exc))
+    def _apply_run_section(self, run: dict):
+        """Apply a recipe's run settings to the Generate-tab controls."""
+        if "sample_mode" in run:
+            self.sample_mode_var.set(config.SAMPLE_MODES[run["sample_mode"]])
+            self._field_weights_mode = run["sample_mode"]
+            self._reset_field_weights()
+        if run.get("field_weights") is not None:
+            for ftype, var in self.field_weight_vars.items():
+                var.set(str(run["field_weights"].get(ftype, 0)))
+        if "split_fractions" in run:
+            train, val, test = run["split_fractions"]
+            self.split_train_var.set(_split_percent(train))
+            self.split_val_var.set(_split_percent(val))
+            self.split_test_var.set(_split_percent(test))
+        if "names_version" in run:
+            self.names_var.set(run["names_version"])
+        if "font_style" in run:
+            label = next(label for label, key in self.font_style_options.items()
+                         if key == run["font_style"])
+            self.font_style_var.set(label)
+            self.cursive_group_var.set(run.get("cursive_group") or "All cursive")
+            self._on_font_style_change()
+            stem = run.get("specific_font", "")
+            display = next((label for label, value in self.specific_font_map.items()
+                            if value == stem), "All in group")
+            self.specific_font_var.set(display)
+        for key in ("writer_profile", "samples_per_writer"):
+            if key in run:
+                setattr(self, f"_run_{key}", run[key])
 
     def _get_selected_dataset_folder(self):
         selected = self.tree.selection()
@@ -1859,6 +1909,7 @@ class App(tk.Tk):
             except tk.TclError:
                 continue
         self._run_control_states = []
+        self._sync_stroke_damage_state()
         self.btn.config(text="⚡  Generate Dataset", command=self.start,
                         state="normal")
         if not self._delete_worker_is_alive():
@@ -1914,24 +1965,17 @@ class App(tk.Tk):
     # ------------------------------------------------------------------
     # Start generation
     # ------------------------------------------------------------------
-    def start(self):
-        if self._any_worker_is_alive():
-            return
+    def _snapshot_run_options(self) -> RunOptions:
+        """Collect and validate every run option on the UI thread.
+
+        The worker receives these plain Python values and never calls Tk while
+        it is running.  Invalid input raises :class:`RunOptionsError`.
+        """
         try:
             count = int(self.count_var.get().replace(",", "").strip())
             config.validate_config(count)
         except (TypeError, ValueError) as exc:
-            messagebox.showerror("Invalid input", str(exc))
-            return
-        warning_count = getattr(config, "LARGE_GENERATION_WARNING_COUNT", None)
-        if warning_count is not None and count >= warning_count:
-            if not messagebox.askyesno(
-                "Large generation job",
-                f"Generate {count:,} samples? This may require substantial disk "
-                "space and time.",
-                icon="warning",
-            ):
-                return
+            raise RunOptionsError("Invalid input", str(exc)) from exc
         raw_seed = self.seed_var.get().strip()
         if not raw_seed:
             seed = random.randint(1, 2_147_483_647)
@@ -1939,41 +1983,34 @@ class App(tk.Tk):
             try:
                 seed = int(raw_seed)
             except ValueError:
-                messagebox.showerror("Invalid input", "Seed must be a whole number.")
-                return
+                raise RunOptionsError(
+                    "Invalid input", "Seed must be a whole number.") from None
 
-        # Snapshot every Tk-backed option on the UI thread. The worker receives
-        # plain Python values and never calls Tk while it is running.
         dataset = self.dataset_var.get().strip()
         if dataset in ("", "(next)"):
             dataset = None
         names_version = self.names_var.get().strip() or None
-        sample_mode = self.mode_by_label.get(
-            self.sample_mode_var.get(), config.DEFAULT_SAMPLE_MODE)
+        sample_mode = self._current_sample_mode()
         font_style, cursive_group, specific_font = self._current_font_selection()
-        augmentation_profile = self._build_custom_developer_profile()
-        edge_clipping = self._get_custom_crop_tuple()
-        semi_broken_params = self._build_semi_broken_params()
-        merge_real = bool(self.real_var.get())
-        package_zip = bool(self.zip_var.get())
 
-        # Extract custom split fractions
         custom_split_fractions = None
         if hasattr(self, "split_train_var"):
             try:
                 tr_pct = float(self.split_train_var.get())
                 val_pct = float(self.split_val_var.get())
                 te_pct = float(self.split_test_var.get())
-                total_pct = tr_pct + val_pct + te_pct
-                if abs(total_pct - 100.0) > 0.01 or tr_pct < 0 or val_pct < 0 or te_pct < 0:
-                    messagebox.showerror("Invalid split ratios", "Train, Val, and Test split percentages must be non-negative and sum to 100%.")
-                    return
-                custom_split_fractions = (tr_pct / 100.0, val_pct / 100.0, te_pct / 100.0)
             except ValueError:
-                messagebox.showerror("Invalid split ratios", "Split ratios must be valid numbers.")
-                return
+                raise RunOptionsError(
+                    "Invalid split ratios", "Split ratios must be valid numbers."
+                ) from None
+            total_pct = tr_pct + val_pct + te_pct
+            if abs(total_pct - 100.0) > 0.01 or tr_pct < 0 or val_pct < 0 or te_pct < 0:
+                raise RunOptionsError(
+                    "Invalid split ratios",
+                    "Train, Val, and Test split percentages must be non-negative "
+                    "and sum to 100%.")
+            custom_split_fractions = (tr_pct / 100.0, val_pct / 100.0, te_pct / 100.0)
 
-        # Extract custom field weights
         custom_field_weights = None
         if hasattr(self, "field_weight_vars") and self.field_weight_vars:
             try:
@@ -1983,14 +2020,15 @@ class App(tk.Tk):
                     if w < 0:
                         raise ValueError(f"Weight for {ftype} cannot be negative.")
                     custom_field_weights[ftype] = w
-                if not any(v > 0 for v in custom_field_weights.values()):
-                    messagebox.showerror("Invalid field weights", "At least one field weight must be greater than zero.")
-                    return
             except ValueError as exc:
-                messagebox.showerror("Invalid field weights", f"Field weights must be non-negative integers: {exc}")
-                return
+                raise RunOptionsError(
+                    "Invalid field weights",
+                    f"Field weights must be non-negative integers: {exc}") from None
+            if not any(v > 0 for v in custom_field_weights.values()):
+                raise RunOptionsError(
+                    "Invalid field weights",
+                    "At least one field weight must be greater than zero.")
 
-        # Extract custom workers count
         workers_count = None
         if hasattr(self, "workers_var"):
             w_str = self.workers_var.get().strip()
@@ -2000,23 +2038,74 @@ class App(tk.Tk):
                 except ValueError:
                     workers_count = None
 
+        return RunOptions(
+            count=count,
+            dataset=dataset,
+            seed=seed,
+            names_version=names_version,
+            sample_mode=sample_mode,
+            font_style=font_style,
+            cursive_group=cursive_group,
+            specific_font=specific_font,
+            augmentation_profile=self._build_custom_developer_profile(),
+            edge_clipping=self._build_cutoff_profile(),
+            stroke_damage_profile=self._build_stroke_damage_profile(),
+            merge_real=bool(self.real_var.get()),
+            package_zip=bool(self.zip_var.get()),
+            custom_field_weights=custom_field_weights,
+            custom_split_fractions=custom_split_fractions,
+            workers=workers_count,
+            writer_profile=self.__dict__.get(
+                "_run_writer_profile", DEFAULT_WRITER_PROFILE_ID),
+            samples_per_writer=self.__dict__.get("_run_samples_per_writer", 32),
+            recipe=self.studio_state.baseline_recipe(),
+            recipe_source=self.studio_state.source_key or self.studio_state.source_name,
+        )
+
+    @staticmethod
+    def _worker_args(options: RunOptions, cancel_event) -> tuple:
+        """Positional arguments for :meth:`_run` from a run snapshot."""
+        return (options.count, options.dataset, options.seed,
+                options.names_version, options.sample_mode,
+                options.font_style, options.cursive_group, options.specific_font,
+                options.merge_real, options.package_zip, cancel_event,
+                options.augmentation_profile, options.edge_clipping,
+                options.stroke_damage_profile, options.custom_field_weights,
+                options.custom_split_fractions, options.workers,
+                options.writer_profile, options.samples_per_writer,
+                options.recipe, options.recipe_source)
+
+    def start(self):
+        if self._any_worker_is_alive():
+            return
+        try:
+            options = self._snapshot_run_options()
+        except RunOptionsError as exc:
+            messagebox.showerror(exc.title, str(exc))
+            return
+        warning_count = getattr(config, "LARGE_GENERATION_WARNING_COUNT", None)
+        if warning_count is not None and options.count >= warning_count:
+            if not messagebox.askyesno(
+                "Large generation job",
+                f"Generate {options.count:,} samples? This may require substantial disk "
+                "space and time.",
+                icon="warning",
+            ):
+                return
+
         self.cancel_event.clear()
         self._pending_terminal = None
         self._set_job_active(True)
         self.open_btn.config(state="disabled")
         self._last_output = None
-        self.progress.config(maximum=count, value=0)
+        self.progress.config(maximum=options.count, value=0)
         self.status.config(text="Starting…", foreground=WARNING)
         self.timer.config(text="")
         self.start_time = time.time()
 
         self.worker = threading.Thread(
             target=self._run,
-            args=(count, dataset, seed, names_version, sample_mode,
-                  font_style, cursive_group, specific_font,
-                  merge_real, package_zip, self.cancel_event,
-                  augmentation_profile, edge_clipping, semi_broken_params,
-                  custom_field_weights, custom_split_fractions, workers_count),
+            args=self._worker_args(options, self.cancel_event),
             daemon=False)
         self.worker.start()
 
@@ -2028,10 +2117,14 @@ class App(tk.Tk):
              merge_real, package_zip, cancel_event,
              augmentation_profile=config.DEFAULT_DEGRADATION_PROFILE,
              edge_clipping=config.DEFAULT_EDGE_CLIPPING,
-             semi_broken_params=None,
+             stroke_damage_profile=None,
              custom_field_weights=None,
              custom_split_fractions=None,
-             workers=None):
+             workers=None,
+             writer_profile=DEFAULT_WRITER_PROFILE_ID,
+             samples_per_writer=32,
+             recipe=None,
+             recipe_source=None):
         try:
             def cb(done, total, field_type):
                 self.q.put(("progress", done, total, field_type))
@@ -2045,10 +2138,14 @@ class App(tk.Tk):
                                archive_planned=package_zip,
                                augmentation_profile=augmentation_profile,
                                edge_clipping=edge_clipping,
-                               semi_broken_params=semi_broken_params,
+                               stroke_damage_profile=stroke_damage_profile,
                                custom_field_weights=custom_field_weights,
                                custom_split_fractions=custom_split_fractions,
-                               workers=workers)
+                               workers=workers,
+                               writer_profile=writer_profile,
+                               samples_per_writer=samples_per_writer,
+                               recipe=recipe,
+                               recipe_source=recipe_source)
             if cancel_event.is_set():
                 self.q.put(("cancelled", "Generation cancelled safely."))
                 return
@@ -2167,6 +2264,12 @@ class App(tk.Tk):
                         self.status.config(text=msg[1], foreground=WARNING)
                 elif kind == "merge_result":
                     self._merge_result = msg[1]
+                elif kind in ("studio_preview", "studio_retry", "studio_preview_error"):
+                    self._handle_preview_message(msg)
+                elif kind == "studio_compare":
+                    self.compare_panel.show(*msg[1:])
+                elif kind == "studio_compare_error":
+                    self.compare_panel.show_error(msg[1])
                 elif kind == "dataset_size":
                     self._patch_row(*msg[1:])
                 elif kind == "refresh_complete":
