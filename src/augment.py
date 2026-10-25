@@ -7,12 +7,16 @@ randomly based on the probabilities in config.
 
 import io
 import random
+from dataclasses import dataclass
 
 import numpy as np
 from PIL import Image, ImageEnhance, ImageFilter, ImageDraw
 
 import config
-from src.generation_profiles import (AugmentationProfile, StrokeDamageProfile,
+from src import cutoff as cutoff_engine
+from src.cutoff import NO_CUT, CutoffResult
+from src.generation_profiles import (AugmentationProfile, CutoffProfile,
+                                     StrokeDamageProfile, as_cutoff_profile,
                                      as_stroke_damage_profile,
                                      get_augmentation_profile)
 
@@ -27,8 +31,7 @@ def _numpy_rng(np_rng):
     return np.random if np_rng is None else np_rng
 
 
-def _rotate(img: Image.Image, rng=None, degrees=None,
-            min_degrees: float = 0.0) -> Image.Image:
+def _draw_rotation_angle(rng=None, degrees=None, min_degrees: float = 0.0) -> float:
     rng = _python_rng(rng)
     degrees = config.AUG_ROTATE_DEGREES if degrees is None else degrees
     if min_degrees > 0:
@@ -36,10 +39,18 @@ def _rotate(img: Image.Image, rng=None, degrees=None,
         angle = rng.uniform(min_degrees, degrees)
         if rng.random() < 0.5:
             angle = -angle
-    else:
-        # The legacy single draw, kept so default output is byte-identical.
-        angle = rng.uniform(-degrees, degrees)
+        return angle
+    # The legacy single draw, kept so default output is byte-identical.
+    return rng.uniform(-degrees, degrees)
+
+
+def _rotate_by(img: Image.Image, angle: float) -> Image.Image:
     return img.rotate(angle, expand=True, fillcolor="white", resample=Image.BICUBIC)
+
+
+def _rotate(img: Image.Image, rng=None, degrees=None,
+            min_degrees: float = 0.0) -> Image.Image:
+    return _rotate_by(img, _draw_rotation_angle(rng, degrees, min_degrees))
 
 
 def _blur(img: Image.Image, rng=None, radius_range=None) -> Image.Image:
@@ -302,12 +313,35 @@ def _clip_edges(img: Image.Image, level: str | tuple[float, float, float, float]
     return img.crop((left, top, right, bottom))
 
 
+@dataclass(frozen=True)
+class DegradeResult:
+    """The degraded image and the character cut applied to it."""
+
+    image: Image.Image
+    cutoff: CutoffResult = NO_CUT
+
+
 def degrade(img: Image.Image, damage_profile: str = "regular",
             rng=None, np_rng=None,
             augmentation_profile: str | AugmentationProfile | None = None,
-            edge_clipping: str | tuple[float, float, float, float] = "none",
+            edge_clipping: str | CutoffProfile | tuple | None = "none",
             semi_broken_params: StrokeDamageProfile | dict | None = None,
             ) -> Image.Image:
+    """Apply the full random augmentation chain and return only the image."""
+    return degrade_detailed(
+        img, damage_profile, rng=rng, np_rng=np_rng,
+        augmentation_profile=augmentation_profile,
+        edge_clipping=edge_clipping,
+        semi_broken_params=semi_broken_params,
+    ).image
+
+
+def degrade_detailed(img: Image.Image, damage_profile: str = "regular",
+                     rng=None, np_rng=None,
+                     augmentation_profile: str | AugmentationProfile | None = None,
+                     edge_clipping: str | CutoffProfile | tuple | None = "none",
+                     semi_broken_params: StrokeDamageProfile | dict | None = None,
+                     ) -> DegradeResult:
     """Apply the full random augmentation chain.
 
     ``augmentation_profile=None`` preserves the mutable configuration-driven
@@ -315,9 +349,15 @@ def degrade(img: Image.Image, damage_profile: str = "regular",
     :class:`AugmentationProfile` freezes all regular augmentation parameters
     and enables its versioned paper-texture, scan-line, and compression steps.
     Every stochastic operation uses the supplied Python/NumPy RNGs.
+
+    ``edge_clipping`` selects a character cutoff (registered ID, profile, or
+    legacy 4-tuple).  The ink mask is built from the clean render only when
+    some side can be cut, so cutoff ``none`` makes no extra draws.
     """
     rng = _python_rng(rng)
     np_rng = _numpy_rng(np_rng)
+    cutoff_profile = as_cutoff_profile(edge_clipping)
+    mask = cutoff_engine.ink_mask(img) if cutoff_profile.active else None
     profile = (
         None if augmentation_profile is None
         else get_augmentation_profile(augmentation_profile)
@@ -381,13 +421,15 @@ def degrade(img: Image.Image, damage_profile: str = "regular",
     if damage_profile.startswith("semi_broken"):
         img = _semi_broken(img, rng=rng, profile=semi_broken_params)
     if rng.random() < rotate_probability:
-        img = _rotate(
-            img,
-            rng=rng,
+        angle = _draw_rotation_angle(
+            rng,
             degrees=(config.AUG_ROTATE_DEGREES if profile is None
                      else profile.rotate_degrees),
             min_degrees=0.0 if profile is None else profile.rotate_min_degrees,
         )
+        img = _rotate_by(img, angle)
+        if mask is not None:
+            mask = cutoff_engine.rotate_mask(mask, angle)
     if rng.random() < blur_probability:
         img = _blur(
             img,
@@ -419,6 +461,7 @@ def degrade(img: Image.Image, damage_profile: str = "regular",
             img = _jpeg_roundtrip(
                 img, rng=rng, quality_range=profile.jpeg_quality_range
             )
-    if edge_clipping and edge_clipping != "none":
-        img = _clip_edges(img, level=edge_clipping, rng=rng)
-    return img
+    result = NO_CUT
+    if mask is not None:
+        img, result = cutoff_engine.apply_cut(img, mask, cutoff_profile, rng)
+    return DegradeResult(img, result)
