@@ -3,6 +3,6 @@
 # cryptographic lock file; see README.md for the update/audit policy.
 -c constraints.txt
 
-pillow>=10.0,<13
+pillow>=13.0.0,<14
 numpy>=1.24,<3
 tqdm>=4.65,<5
